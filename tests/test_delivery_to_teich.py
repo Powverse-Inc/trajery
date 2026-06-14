@@ -107,6 +107,7 @@ class DeliveryToTeichProcessTests(unittest.TestCase):
         self.assertIn("export_total", report)
         self.assertIn("funnel", report)
         self.assertIn("teich_trace_results", report)
+        self.assertEqual(report["teich_trace_results"], [])
 
     def test_passing_fixture_records_valid_trace_result(self) -> None:
         self._copy_fixture("delivery_pass.jsonl")
@@ -126,7 +127,7 @@ class DeliveryToTeichProcessTests(unittest.TestCase):
         self.assertEqual(report["teich_trace_results"][0]["status"], "valid")
         self.assertNotIn("valid_files_omitted", report)
 
-    def test_incomplete_trace_recorded_in_report(self) -> None:
+    def test_incomplete_trace_counted_not_listed_in_report(self) -> None:
         self._copy_fixture("delivery_pass.jsonl")
         incomplete_validation = {
             "ok": True,
@@ -149,13 +150,14 @@ class DeliveryToTeichProcessTests(unittest.TestCase):
             )
         self.assertEqual(stats.teich_incomplete, 1)
         self.assertEqual(stats.teich_valid, 0)
+        self.assertEqual(len(stats.teich_trace_results), 0)
         report = stats.to_report(input_dir=self.input_dir, output_dir=self.output_dir)
-        self.assertEqual(len(report["teich_trace_results"]), 1)
-        row = report["teich_trace_results"][0]
-        self.assertEqual(row["status"], "incomplete")
-        self.assertEqual(row["last_relevant_role"], "tool")
+        self.assertEqual(report["teich_trace_results"], [])
         self.assertNotIn("valid_files_omitted", report)
         self.assertEqual(report["funnel"]["teich_incomplete_rate"], 1.0)
+        self.assertEqual(
+            len(list((self.output_dir / "incomplete").glob("*.jsonl"))), 1
+        )
 
     def test_clean_output_removes_stale_trace_files(self) -> None:
         self._copy_fixture("delivery_pass.jsonl")
@@ -419,6 +421,7 @@ class DeliveryToTeichCliTests(unittest.TestCase):
         md = report_md.read_text(encoding="utf-8")
         self.assertIn("funnel", report)
         self.assertIn("teich_trace_results", report)
+        self.assertEqual(report["teich_trace_results"], [])
         self.assertIn("# delivery_to_teich Report", md)
         self.assertIn("## 漏斗", md)
         self.assertIn("drop_reasons", md)
@@ -433,7 +436,7 @@ class DeliveryToTeichCliTests(unittest.TestCase):
         self.assertTrue((out_dir / "report.json").is_file())
         self.assertFalse((out_dir / "report.md").exists())
 
-    def test_markdown_report_renders_incomplete_rows(self) -> None:
+    def test_markdown_report_omits_incomplete_detail_rows(self) -> None:
         report = {
             "input_dir": "/in",
             "output_dir": "/out",
@@ -451,26 +454,18 @@ class DeliveryToTeichCliTests(unittest.TestCase):
             },
             "drop_reasons": {"stop_reason_tool_calls": 5},
             "teich_errors": {},
-            "teich_trace_results": [
-                {
-                    "filename": "client_a.jsonl",
-                    "session_key": "sess-a",
-                    "status": "incomplete",
-                    "error": "trace_is_complete=False",
-                    "trace_type": "codex",
-                    "messages_count": 20,
-                    "tools_count": 3,
-                    "last_relevant_role": "tool",
-                }
-            ],
+            "teich_trace_results": [],
             "valid_files_omitted": 1,
             "tar_warnings": [],
             "unwrap_failures": {},
         }
         md = to_markdown_report(report)
-        self.assertIn("client_a.jsonl", md)
-        self.assertIn("last_role", md)
+        self.assertNotIn("client_a.jsonl", md)
+        self.assertNotIn("last_role", md)
         self.assertIn("stop_reason_tool_calls", md)
+        self.assertIn("incomplete（1）", md)
+        self.assertIn("/out/incomplete/", md)
+        self.assertIn("--report-include-valid", md)
 
 
 if __name__ == "__main__":

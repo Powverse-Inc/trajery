@@ -83,7 +83,7 @@ class PipelineStats:
     - ``teich_invalid``: 转换失败 → ``invalid/``
     - ``teich_errors``: invalid 错误消息 Counter
     - ``tar_warnings``: 多成员 tar 告警 → ``report.tar_warnings``
-    - ``teich_trace_results``: 逐条 Teich 校验明细 → ``report.teich_trace_results``
+    - ``teich_trace_results``: 可选 valid 逐条明细（``--report-include-valid``）→ ``report.teich_trace_results``
     - ``elapsed_seconds``: 总耗时 → ``report.elapsed_seconds``
 
     English: Counters map to report.json and output subdirectories.
@@ -117,7 +117,8 @@ class PipelineStats:
         """序列化为 report.json 字典 / Serialize stats to report.json schema.
 
         中文：字段与 USER_GUIDE §6.2 一一对应；``tar_*`` 字段由 ``tar_warnings`` 聚合。
-        ``teich_trace_results`` 默认仅含 incomplete/invalid；valid 用 ``valid_files_omitted`` 计数。
+        ``teich_trace_results`` 默认空；``include_valid_files=True`` 时仅含 valid，
+        否则用 ``valid_files_omitted`` 计数。incomplete/invalid 仅保留汇总计数。
 
         English: Produces the JSON report dict written by CLI.
         """
@@ -133,9 +134,11 @@ class PipelineStats:
                 round(self.teich_invalid / export_total, 4) if export_total else None
             ),
         }
-        trace_results = self.teich_trace_results
-        if not include_valid_files:
-            trace_results = [r for r in trace_results if r.status != "valid"]
+        trace_results = (
+            [r for r in self.teich_trace_results if r.status == "valid"]
+            if include_valid_files
+            else []
+        )
 
         report: dict[str, Any] = {
             "input_dir": str(input_dir),
@@ -633,14 +636,6 @@ def process(
             stats.teich_invalid += 1
             err = validation.get("error") or "unknown"
             stats.teich_errors[str(err)] += 1
-            _append_teich_trace_result(
-                stats,
-                trace_path=trace_path,
-                session_key=session_key,
-                status="invalid",
-                validation=validation,
-                error=str(err),
-            )
             if log:
                 log(f"[export] invalid {trace_path.name}: {err}")
             invalid_path = invalid_dir / trace_path.name
@@ -649,13 +644,6 @@ def process(
                 trace_path.unlink()
         elif not validation.get("complete"):
             stats.teich_incomplete += 1
-            _append_teich_trace_result(
-                stats,
-                trace_path=trace_path,
-                session_key=session_key,
-                status="incomplete",
-                validation=validation,
-            )
             if log:
                 log(f"[export] incomplete {trace_path.name}: not trace_is_complete")
             incomplete_path = incomplete_dir / trace_path.name

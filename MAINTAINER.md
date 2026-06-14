@@ -126,4 +126,4 @@
 
 ### 跑批产出中的文档
 
-`report.md` 由 `trajery/report.py` 生成，附录链接 USER_GUIDE。改报表结构时同步更新 `report.py` 与 USER_GUIDE §6。
+`report.md` 由 `trajery/report.py` 生成，附录链接 USER_GUIDE。改报表结构时同步更新 `report.py` 与 USER_GUIDE §6。incomplete/invalid 逐文件明细仅写入输出目录，不写入报表。

@@ -190,67 +190,27 @@ def to_markdown_report(
             lines.append(f"| `{_fmt_cell(err)}` | {count} |")
         lines.append("")
 
-    trace_results: list[dict[str, Any]] = report.get("teich_trace_results") or []
-    invalid_rows = [
-        r for r in trace_results if r.get("status") == "invalid"
-    ]
-    incomplete_rows = [
-        r for r in trace_results if r.get("status") == "incomplete"
-    ]
+    output_dir = report.get("output_dir") or ""
+    lines.append("### 明细位置")
+    lines.append("")
+    lines.append(
+        f"- incomplete（{teich_incomplete}）：见 `{output_dir}/incomplete/`"
+    )
+    lines.append(
+        f"- invalid（{teich_invalid}）：见 `{output_dir}/invalid/`"
+    )
     valid_omitted = report.get("valid_files_omitted")
-
-    lines.append(f"### invalid（{teich_invalid}）")
-    lines.append("")
-    if invalid_rows:
-        lines.append("| 文件 | session_key | error | trace_type |")
-        lines.append("|------|-------------|-------|------------|")
-        for row in invalid_rows:
-            lines.append(
-                "| "
-                + " | ".join(
-                    _fmt_cell(row.get(k))
-                    for k in ("filename", "session_key", "error", "trace_type")
-                )
-                + " |"
-            )
-    else:
-        lines.append("（无）")
-    lines.append("")
-
-    lines.append(f"### incomplete（{teich_incomplete}）")
-    lines.append("")
-    if incomplete_rows:
-        lines.append(
-            "| 文件 | session_key | messages | tools | last_role | error |"
-        )
-        lines.append(
-            "|------|-------------|----------|-------|-----------|-------|"
-        )
-        for row in incomplete_rows:
-            lines.append(
-                "| "
-                + " | ".join(
-                    [
-                        _fmt_cell(row.get("filename")),
-                        _fmt_cell(row.get("session_key")),
-                        _fmt_cell(row.get("messages_count")),
-                        _fmt_cell(row.get("tools_count")),
-                        _fmt_cell(row.get("last_relevant_role")),
-                        _fmt_cell(row.get("error")),
-                    ]
-                )
-                + " |"
-            )
-    else:
-        lines.append("（无）")
-    lines.append("")
-
     if valid_omitted:
         lines.append(
-            f"> valid trace 共 {valid_omitted} 条，未列入上表。"
-            "使用 `--report-include-valid` 可写入 `report.json`。"
+            f"- valid（{valid_omitted}）：见 `{output_dir}/traces/`；"
+            "使用 `--report-include-valid` 可写入 `report.json` 的 "
+            "`teich_trace_results`"
         )
-        lines.append("")
+    else:
+        lines.append(
+            f"- valid（{teich_valid}）：见 `{output_dir}/traces/`"
+        )
+    lines.append("")
 
     tar_warnings: list[dict[str, Any]] = report.get("tar_warnings") or []
     if tar_warnings:

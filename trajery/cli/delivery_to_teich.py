@@ -100,7 +100,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--report-include-valid",
         action="store_true",
-        help="Include valid trace filenames in report.json teich_trace_results",
+        help=(
+            "Include valid trace filenames in report.json teich_trace_results "
+            "(default: empty; incomplete/invalid are not listed)"
+        ),
     )
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument(
