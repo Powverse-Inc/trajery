@@ -87,7 +87,7 @@ class PipelineStats:
     - ``elapsed_seconds``: 总耗时 → ``report.elapsed_seconds``
 
     English: Counters map to report.json and output subdirectories.
-    See USER_GUIDE §6.3 for metric relationships.
+    See USER_GUIDE §6.4 for metric relationships.
     """
 
     scanned: int = 0
