@@ -108,6 +108,7 @@ python delivery_to_teich.py --help
 | `--quiet` | off | 静默 |
 | `--progress-every N` | `100` | 扫描心跳间隔；`0` 关闭 |
 | `--clean-output` | off | 跑批前清空 `traces/`、`incomplete/`、`invalid/`、`dropped/`、`unwrapped/` |
+| `--workers N` | `1` | scan 阶段并行 worker 数；`1`=串行（默认），`>1` 按 tar/jsonl 文件并行 |
 | `--skip-teich-validate` | off | 跳过 Teich 校验（仅调试） |
 | `--strict-empty` | off | `teich_valid==0` 时退出码 1 |
 
@@ -119,6 +120,7 @@ python delivery_to_teich.py /path/to/delivery_log --no-dropped --emit-training-r
 python delivery_to_teich.py /path/to/delivery_log --limit-files 1 --limit-records 100
 python delivery_to_teich.py /path/to/delivery_log --keep-unwrapped --limit-records 20
 python delivery_to_teich.py /path/to/delivery_log --clean-output
+python delivery_to_teich.py /path/to/delivery_log --workers 8
 ```
 
 ### 4.4 独立多平台 filter CLI
@@ -146,6 +148,7 @@ python filter_traj_multi_plat.py <input_dir> [<output_dir>] \
 |------|------|
 | **tar.gz 单成员** | 每个 `.tar.gz` 只读取**第一个** `.jsonl` 成员；多成员时在日志与 `report.json` 的 `tar_warnings` 中告警 |
 | **dedup 内存** | 默认在内存中缓冲每个 session 的最长快照；超大目录需注意内存 |
+| **并行 scan** | `--workers > 1` 时按源文件并行；机械硬盘建议 `2~4`，NVMe 可用 CPU 核心数；`--limit-records` 时强制串行 |
 | **时间戳** | Codex 事件使用**导出时 UTC**，非 delivery 原始时间戳 |
 | **R5 与 delivery** | 顶层 `stop_reason` 常为空；是否通过 R5 以 `extract()` 结果为准 |
 

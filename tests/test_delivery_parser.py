@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -17,6 +18,7 @@ from trajery.export import (
 from trajery.parser import (
     classify_unwrap_failure,
     inspect_tar_jsonl_members,
+    iter_delivery_records,
     iter_delivery_sources,
     parse_delivery_response,
     unwrap_delivery_record,
@@ -150,6 +152,28 @@ class FixtureIntegrationTests(unittest.TestCase):
         self.assertEqual(meta["jsonl_member_count"], 2)
         self.assertEqual(meta["used_member"], "shard_a.jsonl")
         self.assertEqual(meta["skipped_members"], ["shard_b.jsonl"])
+
+    def test_tar_single_open_yields_same_records(self) -> None:
+        from trajery.parser.delivery import iter_delivery_records, iter_tar_jsonl_with_meta
+
+        tar_path = FIXTURES_DATA / "delivery_multi_member.tar.gz"
+        meta = None
+        line_count = 0
+        for kind, *payload in iter_tar_jsonl_with_meta(tar_path):
+            if kind == "meta":
+                meta = payload[0]
+            else:
+                line_count += 1
+        self.assertIsNotNone(meta)
+        assert meta is not None
+        self.assertEqual(meta["jsonl_member_count"], 2)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            shutil.copy(tar_path, root / "delivery_multi_member.tar.gz")
+            records = list(iter_delivery_records(root))
+        self.assertGreaterEqual(len(records), 1)
+        self.assertGreaterEqual(line_count, 1)
 
     def test_malformed_fixture_failure_codes(self) -> None:
         lines = (FIXTURES_DATA / "delivery_malformed.jsonl").read_text(encoding="utf-8").splitlines()

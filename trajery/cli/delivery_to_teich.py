@@ -105,6 +105,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Skip Teich validation (for environments without teich installed)",
     )
     parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Parallel worker count for scan phase only (1=serial, default)",
+    )
+    parser.add_argument(
         "--strict-empty", action="store_true", help="Exit 1 if teich_valid == 0"
     )
     args = parser.parse_args(argv)
@@ -151,6 +157,7 @@ def main(argv: list[str] | None = None) -> int:
         progress_every=args.progress_every,
         clean_output=args.clean_output,
         skip_teich_validate=args.skip_teich_validate,
+        workers=args.workers,
         log=None if args.quiet else log,
     )
 

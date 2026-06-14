@@ -30,6 +30,7 @@ import json
 import shutil
 import time
 from collections import Counter
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -44,6 +45,7 @@ from trajery.export import (
 from trajery.parser import (
     classify_unwrap_failure,
     iter_delivery_records,
+    iter_delivery_sources,
     session_key_from_record,
     unwrap_delivery_record,
 )
@@ -191,6 +193,95 @@ def _top_drop_reasons(stats: PipelineStats, limit: int = 5) -> str:
     return ", ".join(parts)
 
 
+def _run_parallel_scan(
+    *,
+    input_dir: Path,
+    output_dir: Path,
+    apply_filter: bool,
+    dedup: bool,
+    keep_unwrapped: bool,
+    write_dropped: bool,
+    limit_files: int | None,
+    workers: int,
+    dropped_dir: Path | None,
+    unwrapped_dir: Path,
+    traces_dir: Path,
+    log: Any,
+    scan_started: float,
+    started: float,
+) -> tuple[PipelineStats, dict[str, tuple[int, dict[str, Any], dict[str, Any], str]], list[tuple[dict[str, Any], list[dict[str, Any]], str, Path]]]:
+    """Parallel scan phase: one worker per source file."""
+    from trajery.pipeline_scan import (
+        ScanWorkerConfig,
+        merge_dedup_winners,
+        merge_stats,
+        scan_one_source,
+    )
+
+    sources = list(iter_delivery_sources(input_dir, exclude_dirs=[output_dir]))
+    if limit_files is not None:
+        sources = sources[:limit_files]
+
+    source_order = {rel: idx for idx, (rel, _path) in enumerate(sources)}
+    worker_config = ScanWorkerConfig(
+        apply_filter=apply_filter,
+        dedup=dedup,
+        keep_unwrapped=keep_unwrapped,
+        write_dropped=write_dropped,
+        dropped_dir=str(dropped_dir) if dropped_dir is not None else None,
+        unwrapped_dir=str(unwrapped_dir),
+        traces_dir=str(traces_dir),
+    )
+    tasks = [(rel, str(path), worker_config) for rel, path in sources]
+    total_files = len(tasks)
+    results = []
+
+    if log:
+        log(f"parallel scan: {total_files} source files, workers={workers}")
+
+    with ProcessPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(scan_one_source, task): task[0] for task in tasks}
+        completed = 0
+        for future in as_completed(futures):
+            rel = futures[future]
+            results.append(future.result())
+            completed += 1
+            if log and (completed == 1 or completed == total_files or completed % max(1, total_files // 10) == 0):
+                partial = merge_stats([r.stats for r in results])
+                log(
+                    f"[scan] files {completed}/{total_files} "
+                    f"{_progress_summary(partial, elapsed=time.monotonic() - started)}"
+                )
+            if log and completed <= 3:
+                log(f"finished file: {rel}")
+
+    cross_file_drops = 0
+    dedup_winners: dict[str, tuple[int, dict[str, Any], dict[str, Any], str]] = {}
+    pending_exports: list[tuple[dict[str, Any], list[dict[str, Any]], str, Path]] = []
+
+    if dedup:
+        dedup_winners, cross_file_drops = merge_dedup_winners(
+            [r.dedup_winners for r in results],
+            source_order,
+            write_dropped=write_dropped,
+            dropped_dir=dropped_dir,
+        )
+    else:
+        for result in results:
+            for unwrapped, events, session_key, trace_path_str in result.pending_exports:
+                pending_exports.append(
+                    (unwrapped, events, session_key, Path(trace_path_str))
+                )
+
+    stats = merge_stats([r.stats for r in results], cross_file_drops=cross_file_drops)
+    stats.tar_warnings = [warning for r in results for warning in r.tar_warnings]
+
+    if log:
+        log(f"[scan] parallel scan complete in {_elapsed_str(time.monotonic() - scan_started)}")
+
+    return stats, dedup_winners, pending_exports
+
+
 def process(
     *,
     input_dir: Path,
@@ -205,6 +296,7 @@ def process(
     progress_every: int = 1000,
     clean_output: bool = False,
     skip_teich_validate: bool = False,
+    workers: int = 1,
     log: Any = print,
 ) -> PipelineStats:
     """主流水线入口：扫描、筛选、去重、导出、校验 / Main delivery pipeline entry point.
@@ -233,12 +325,12 @@ def process(
         progress_every: 扫描心跳间隔；0=关 / Scan heartbeat interval; 0=off.
         clean_output: 跑批前清空五目录 / Clear output subdirs before run.
         skip_teich_validate: 跳过 teich；teich_valid 虚假递增 / Skip Teich validation.
+        workers: scan 阶段并行 worker 数；1=串行 / Parallel workers for scan; 1=serial.
         log: 日志 callable；None=静默 / Logger callable; None for silent mode.
 
     Returns:
         ``PipelineStats`` with all counters populated.
     """
-    stats = PipelineStats()
     started = time.monotonic()
     scan_started = started
     current_source_file: str | None = None
@@ -277,114 +369,142 @@ def process(
             log(f"progress heartbeat every {progress_every} records")
         if clean_output:
             log("options: clean_output=on (cleared traces/incomplete/invalid/dropped/unwrapped)")
+        if workers > 1:
+            log(f"options: workers={workers} (parallel scan)")
 
     # dedup_winners[sid] = (msg_count, unwrapped, item, session_key)
-    dedup_winners: dict[str, tuple[int, dict[str, Any], list[dict[str, Any]], str]] = {}
+    dedup_winners: dict[str, tuple[int, dict[str, Any], dict[str, Any], str]] = {}
     pending_exports: list[tuple[dict[str, Any], list[dict[str, Any]], str, Path]] = []
     tar_warnings: list[dict[str, Any]] = []
 
-    # === Phase 1: Scan loop（iter_delivery_records）/ Scan all delivery records ===
-    for item in iter_delivery_records(
-        input_dir,
-        limit_files=limit_files,
-        exclude_dirs=[output_dir],
-        tar_warnings=tar_warnings,
-    ):
-        # --- 1a: 限流与文件切换日志 / Rate limits and per-file logging ---
-        if limit_records is not None and stats.scanned >= limit_records:
-            if log:
-                log(f"reached --limit-records={limit_records}, stopping scan")
-            break
+    use_parallel_scan = workers > 1 and limit_records is None
 
-        source_file = str(item.get("source_file") or "")
-        if source_file != current_source_file:
-            if log and current_source_file is not None:
-                log(
-                    f"finished file: {current_source_file} "
-                    f"({current_file_records} records in this file)"
-                )
-            current_source_file = source_file
-            current_file_records = 0
-            if log and source_file:
-                log(f"reading: {source_file}")
+    if use_parallel_scan:
+        stats, dedup_winners, pending_exports = _run_parallel_scan(
+            input_dir=input_dir,
+            output_dir=output_dir,
+            apply_filter=apply_filter,
+            dedup=dedup,
+            keep_unwrapped=keep_unwrapped,
+            write_dropped=write_dropped,
+            limit_files=limit_files,
+            workers=workers,
+            dropped_dir=dropped_dir,
+            unwrapped_dir=unwrapped_dir,
+            traces_dir=traces_dir,
+            log=log,
+            scan_started=scan_started,
+            started=started,
+        )
+        tar_warnings = stats.tar_warnings
+    else:
+        if workers > 1 and limit_records is not None and log:
+            log("NOTE: --limit-records forces serial scan (workers ignored for scan)")
 
-        stats.scanned += 1
-        current_file_records += 1
-        if progress_every and stats.scanned % progress_every == 0 and log:
-            log(f"[scan] {_progress_summary(stats, elapsed=time.monotonic() - started)}")
+        stats = PipelineStats()
 
-        record = item.get("record")
+        # === Phase 1: Scan loop（iter_delivery_records）/ Scan all delivery records ===
+        for item in iter_delivery_records(
+            input_dir,
+            limit_files=limit_files,
+            exclude_dirs=[output_dir],
+            tar_warnings=tar_warnings,
+        ):
+            # --- 1a: 限流与文件切换日志 / Rate limits and per-file logging ---
+            if limit_records is not None and stats.scanned >= limit_records:
+                if log:
+                    log(f"reached --limit-records={limit_records}, stopping scan")
+                break
 
-        # --- 1b: parse / unwrap / Line-level parse and envelope unwrap ---
-        if not isinstance(record, dict):
-            stats.parse_errors += 1
-            stats.json_line_errors += 1
-            continue
+            source_file = str(item.get("source_file") or "")
+            if source_file != current_source_file:
+                if log and current_source_file is not None:
+                    log(
+                        f"finished file: {current_source_file} "
+                        f"({current_file_records} records in this file)"
+                    )
+                current_source_file = source_file
+                current_file_records = 0
+                if log and source_file:
+                    log(f"reading: {source_file}")
 
-        failure = classify_unwrap_failure(record)
-        if failure is not None:
-            stats.parse_errors += 1
-            stats.unwrap_failures[failure] += 1
-            continue
+            stats.scanned += 1
+            current_file_records += 1
+            if progress_every and stats.scanned % progress_every == 0 and log:
+                log(f"[scan] {_progress_summary(stats, elapsed=time.monotonic() - started)}")
 
-        unwrapped = unwrap_delivery_record(record)
-        if unwrapped is None:
-            stats.parse_errors += 1
-            stats.unwrap_failures["unwrap_error"] += 1
-            continue
-        stats.unwrapped += 1
+            record = item.get("record")
 
-        if keep_unwrapped:
-            rel = f"{_safe_rel_path(item['source_file'])}_{item['source_line']}.jsonl"
-            _write_jsonl(unwrapped_dir / rel, unwrapped)
+            # --- 1b: parse / unwrap / Line-level parse and envelope unwrap ---
+            if not isinstance(record, dict):
+                stats.parse_errors += 1
+                stats.json_line_errors += 1
+                continue
 
-        # --- 1c: filter (R1–R7 evaluate) / Apply procurement filter rules ---
-        trajectory = extract(unwrapped)
-        passed, reasons = evaluate(trajectory)
-        if apply_filter and not passed:
-            stats.filter_dropped += 1
-            stats.drop_reasons.update(reasons)
-            if write_dropped and dropped_dir is not None:
-                dropped = {**record, "_drop_reasons": reasons}
-                rel = (
-                    f"{_safe_rel_path(item['source_file'])}_{item['source_line']}.jsonl"
-                )
-                _write_jsonl(dropped_dir / rel, dropped)
-            continue
+            failure = classify_unwrap_failure(record)
+            if failure is not None:
+                stats.parse_errors += 1
+                stats.unwrap_failures[failure] += 1
+                continue
 
-        stats.filter_kept += 1
-        session_key = session_key_from_record(record)
-        msg_count = len(trajectory.get("messages") or [])
+            unwrapped = unwrap_delivery_record(record)
+            if unwrapped is None:
+                stats.parse_errors += 1
+                stats.unwrap_failures["unwrap_error"] += 1
+                continue
+            stats.unwrapped += 1
 
-        # --- 1d: dedup 缓冲 vs 即时 export / Dedup buffer or immediate export ---
-        if dedup:
-            sid = compute_session_id(trajectory) or session_key
-            prev = dedup_winners.get(sid)
-            if prev is not None and prev[0] >= msg_count:
-                # Shorter snapshot loses: same session_id, fewer messages.
-                stats.dedup_dropped += 1
-                stats.drop_reasons["session_id_duplicate"] += 1
+            if keep_unwrapped:
+                rel = f"{_safe_rel_path(item['source_file'])}_{item['source_line']}.jsonl"
+                _write_jsonl(unwrapped_dir / rel, unwrapped)
+
+            # --- 1c: filter (R1–R7 evaluate) / Apply procurement filter rules ---
+            trajectory = extract(unwrapped)
+            passed, reasons = evaluate(trajectory)
+            if apply_filter and not passed:
+                stats.filter_dropped += 1
+                stats.drop_reasons.update(reasons)
                 if write_dropped and dropped_dir is not None:
-                    dropped = {**record, "_drop_reasons": ["session_id_duplicate"]}
-                    rel = f"{_safe_rel_path(item['source_file'])}_{item['source_line']}.jsonl"
+                    dropped = {**record, "_drop_reasons": reasons}
+                    rel = (
+                        f"{_safe_rel_path(item['source_file'])}_{item['source_line']}.jsonl"
+                    )
                     _write_jsonl(dropped_dir / rel, dropped)
                 continue
-            # Keep the longest-messages snapshot; full pass required before export.
-            dedup_winners[sid] = (msg_count, unwrapped, item, session_key)
-            continue
 
-        # dedup=False: convert and queue export immediately during scan.
-        events = openai_responses_to_codex_events(unwrapped)
-        trace_name = _safe_filename(session_key) + ".jsonl"
-        pending_exports.append(
-            (unwrapped, events, session_key, traces_dir / trace_name)
-        )
+            stats.filter_kept += 1
+            session_key = session_key_from_record(record)
+            msg_count = len(trajectory.get("messages") or [])
 
-    if log and current_source_file is not None:
-        log(
-            f"finished file: {current_source_file} "
-            f"({current_file_records} records in this file)"
-        )
+            # --- 1d: dedup 缓冲 vs 即时 export / Dedup buffer or immediate export ---
+            if dedup:
+                sid = compute_session_id(trajectory) or session_key
+                prev = dedup_winners.get(sid)
+                if prev is not None and prev[0] >= msg_count:
+                    # Shorter snapshot loses: same session_id, fewer messages.
+                    stats.dedup_dropped += 1
+                    stats.drop_reasons["session_id_duplicate"] += 1
+                    if write_dropped and dropped_dir is not None:
+                        dropped = {**record, "_drop_reasons": ["session_id_duplicate"]}
+                        rel = f"{_safe_rel_path(item['source_file'])}_{item['source_line']}.jsonl"
+                        _write_jsonl(dropped_dir / rel, dropped)
+                    continue
+                # Keep the longest-messages snapshot; full pass required before export.
+                dedup_winners[sid] = (msg_count, unwrapped, item, session_key)
+                continue
+
+            # dedup=False: convert and queue export immediately during scan.
+            events = openai_responses_to_codex_events(unwrapped)
+            trace_name = _safe_filename(session_key) + ".jsonl"
+            pending_exports.append(
+                (unwrapped, events, session_key, traces_dir / trace_name)
+            )
+
+        if log and current_source_file is not None:
+            log(
+                f"finished file: {current_source_file} "
+                f"({current_file_records} records in this file)"
+            )
 
     # === Phase 1 收尾：tar_warnings、scan 汇总 / Scan phase wrap-up ===
     scan_elapsed = time.monotonic() - scan_started

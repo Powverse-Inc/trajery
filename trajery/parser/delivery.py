@@ -61,6 +61,29 @@ def _iter_jsonl_lines(path: Path) -> Iterator[tuple[int, dict[str, Any] | None, 
             yield line_no, obj, line
 
 
+def _tar_jsonl_member_names(archive: tarfile.TarFile) -> list[str]:
+    """List ``.jsonl`` member paths inside an open tar archive."""
+    return [name for name in archive.getnames() if name.endswith(".jsonl")]
+
+
+def _tar_jsonl_meta(path: Path, members: list[str]) -> dict[str, Any]:
+    """Build tar member metadata dict from a precomputed member list."""
+    if not members:
+        return {
+            "archive": str(path),
+            "jsonl_member_count": 0,
+            "used_member": None,
+            "skipped_members": [],
+        }
+    return {
+        "archive": str(path),
+        "jsonl_member_count": len(members),
+        # Policy: only the first .jsonl member is consumed (see USER_GUIDE §5).
+        "used_member": members[0],
+        "skipped_members": members[1:],
+    }
+
+
 def inspect_tar_jsonl_members(path: Path) -> dict[str, Any]:
     """返回 tar 内 .jsonl 成员元数据 / Return metadata about ``.jsonl`` members in a tar.
 
@@ -75,21 +98,30 @@ def inspect_tar_jsonl_members(path: Path) -> dict[str, Any]:
         ``used_member``, ``skipped_members``.
     """
     with tarfile.open(path, "r:gz") as archive:
-        members = [name for name in archive.getnames() if name.endswith(".jsonl")]
-        if not members:
-            return {
-                "archive": str(path),
-                "jsonl_member_count": 0,
-                "used_member": None,
-                "skipped_members": [],
-            }
-        return {
-            "archive": str(path),
-            "jsonl_member_count": len(members),
-            # Policy: only the first .jsonl member is consumed (see USER_GUIDE §5).
-            "used_member": members[0],
-            "skipped_members": members[1:],
-        }
+        return _tar_jsonl_meta(path, _tar_jsonl_member_names(archive))
+
+
+def _iter_tar_jsonl_lines(
+    archive: tarfile.TarFile,
+    member_name: str,
+) -> Iterator[tuple[int, dict[str, Any] | None, str | None]]:
+    """Iterate parsed JSONL lines from one tar member inside an open archive."""
+    extracted = archive.extractfile(member_name)
+    if extracted is None:
+        return
+    for line_no, raw in enumerate(extracted, start=1):
+        line = raw.decode("utf-8", errors="replace").rstrip("\n")
+        if not line.strip():
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            yield line_no, None, line
+            continue
+        if not isinstance(obj, dict):
+            yield line_no, None, line
+            continue
+        yield line_no, obj, line
 
 
 def _iter_tar_jsonl(path: Path) -> Iterator[tuple[str, int, dict[str, Any] | None, str | None]]:
@@ -100,26 +132,62 @@ def _iter_tar_jsonl(path: Path) -> Iterator[tuple[str, int, dict[str, Any] | Non
     English: Same first-member-only policy as ``inspect_tar_jsonl_members``.
     """
     with tarfile.open(path, "r:gz") as archive:
-        members = [name for name in archive.getnames() if name.endswith(".jsonl")]
+        members = _tar_jsonl_member_names(archive)
         if not members:
             return
         member_name = members[0]
-        extracted = archive.extractfile(member_name)
-        if extracted is None:
+        for line_no, record, raw in _iter_tar_jsonl_lines(archive, member_name):
+            yield member_name, line_no, record, raw
+
+
+def iter_tar_jsonl_with_meta(
+    path: Path,
+) -> Iterator[tuple[str, Any]]:
+    """单次打开 tar：先 yield 元数据，再 yield 行记录 / Open tar once for meta + lines.
+
+    中文：在 ``with tarfile.open`` 块内完成元数据与行迭代，避免双次打开。
+
+    Yields:
+        ``("meta", meta_dict)`` then ``("record", source_file, line_no, record)``.
+    """
+    with tarfile.open(path, "r:gz") as archive:
+        members = _tar_jsonl_member_names(archive)
+        meta = _tar_jsonl_meta(path, members)
+        yield "meta", meta
+        if not members:
             return
-        for line_no, raw in enumerate(extracted, start=1):
-            line = raw.decode("utf-8", errors="replace").rstrip("\n")
-            if not line.strip():
-                continue
-            try:
-                obj = json.loads(line)
-            except json.JSONDecodeError:
-                yield member_name, line_no, None, line
-                continue
-            if not isinstance(obj, dict):
-                yield member_name, line_no, None, line
-                continue
-            yield member_name, line_no, obj, line
+        member_name = members[0]
+        for line_no, record, _raw in _iter_tar_jsonl_lines(archive, member_name):
+            yield "record", member_name, line_no, record
+
+
+def iter_records_from_source(rel: str, path: Path) -> Iterator[dict[str, Any]]:
+    """逐条 yield 单个源文件（jsonl 或 tar.gz）的 delivery 记录 / Yield records from one file.
+
+    中文：tar 来源使用单次 ``tarfile.open``；``source_file`` 格式与
+    ``iter_delivery_records`` 一致。
+
+    Yields:
+        Dicts with keys ``source_file``, ``source_line``, ``record``.
+    """
+    if path.suffix == ".jsonl":
+        for line_no, record, _raw in _iter_jsonl_lines(path):
+            yield {
+                "source_file": rel,
+                "source_line": line_no,
+                "record": record,
+            }
+        return
+
+    for kind, *payload in iter_tar_jsonl_with_meta(path):
+        if kind == "meta":
+            continue
+        member_name, line_no, record = payload
+        yield {
+            "source_file": f"{rel}:{member_name}",
+            "source_line": line_no,
+            "record": record,
+        }
 
 
 def _is_under(path: Path, parent: Path) -> bool:
@@ -208,26 +276,23 @@ def iter_delivery_records(
             return
 
         if path.name.endswith(".tar.gz"):
-            meta = inspect_tar_jsonl_members(path)
-            if meta["jsonl_member_count"] > 1 and tar_warnings is not None:
-                tar_warnings.append({**meta, "source_file": rel})
-
-        if path.suffix == ".jsonl":
-            for line_no, record, _raw in _iter_jsonl_lines(path):
+            tar_meta: dict[str, Any] | None = None
+            for kind, *payload in iter_tar_jsonl_with_meta(path):
+                if kind == "meta":
+                    tar_meta = payload[0]
+                    if tar_meta["jsonl_member_count"] > 1 and tar_warnings is not None:
+                        tar_warnings.append({**tar_meta, "source_file": rel})
+                    continue
+                member_name, line_no, record = payload
                 yield {
-                    "source_file": rel,
+                    "source_file": f"{rel}:{member_name}",
                     "source_line": line_no,
                     "record": record,
                 }
             continue
 
-        # Tar branch: iterate first .jsonl member inside archive.
-        for member_name, line_no, record, _raw in _iter_tar_jsonl(path):
-            yield {
-                "source_file": f"{rel}:{member_name}",
-                "source_line": line_no,
-                "record": record,
-            }
+        for item in iter_records_from_source(rel, path):
+            yield item
 
 
 def classify_unwrap_failure(record: dict[str, Any]) -> str | None:

@@ -135,6 +135,147 @@ class DeliveryToTeichProcessTests(unittest.TestCase):
         self.assertEqual(stats.filter_kept, 1)
         self.assertEqual(stats.filter_dropped, 0)
 
+    def _stats_dict(self, stats) -> dict:
+        return {
+            "scanned": stats.scanned,
+            "parse_errors": stats.parse_errors,
+            "json_line_errors": stats.json_line_errors,
+            "unwrap_failures": dict(stats.unwrap_failures),
+            "unwrapped": stats.unwrapped,
+            "filter_kept": stats.filter_kept,
+            "filter_dropped": stats.filter_dropped,
+            "dedup_dropped": stats.dedup_dropped,
+            "teich_valid": stats.teich_valid,
+            "teich_incomplete": stats.teich_incomplete,
+            "teich_invalid": stats.teich_invalid,
+            "drop_reasons": dict(stats.drop_reasons),
+            "tar_warnings": stats.tar_warnings,
+        }
+
+    def test_workers_1_matches_default_serial(self) -> None:
+        self._copy_fixture("delivery_pass.jsonl")
+        serial = process(
+            input_dir=self.input_dir,
+            output_dir=self.root / "out_serial",
+            progress_every=0,
+            workers=1,
+            log=None,
+        )
+        parallel = process(
+            input_dir=self.input_dir,
+            output_dir=self.root / "out_workers1",
+            progress_every=0,
+            workers=1,
+            log=None,
+        )
+        self.assertEqual(self._stats_dict(serial), self._stats_dict(parallel))
+
+    def test_workers_parallel_same_stats_as_serial(self) -> None:
+        fixtures = [
+            "delivery_pass.jsonl",
+            "delivery_dedup_pair.jsonl",
+            "delivery_malformed.jsonl",
+            "delivery_multi_member.tar.gz",
+        ]
+        for name in fixtures:
+            with self.subTest(fixture=name):
+                input_dir = self.root / f"in_{name}"
+                input_dir.mkdir()
+                shutil.copy(FIXTURES_DATA / name, input_dir / name)
+                serial = process(
+                    input_dir=input_dir,
+                    output_dir=self.root / f"serial_{name}",
+                    progress_every=0,
+                    workers=1,
+                    log=None,
+                )
+                parallel = process(
+                    input_dir=input_dir,
+                    output_dir=self.root / f"parallel_{name}",
+                    progress_every=0,
+                    workers=4,
+                    log=None,
+                )
+                self.assertEqual(
+                    self._stats_dict(serial),
+                    self._stats_dict(parallel),
+                    f"stats mismatch for {name}",
+                )
+                self.assertEqual(
+                    len(list((self.root / f"serial_{name}" / "traces").glob("*.jsonl"))),
+                    len(list((self.root / f"parallel_{name}" / "traces").glob("*.jsonl"))),
+                )
+
+    def test_parallel_dedup_cross_file(self) -> None:
+        lines = (FIXTURES_DATA / "delivery_dedup_pair.jsonl").read_text(encoding="utf-8").splitlines()
+        (self.input_dir / "aaa_shorter.jsonl").write_text(lines[0] + "\n", encoding="utf-8")
+        (self.input_dir / "bbb_longer.jsonl").write_text(lines[1] + "\n", encoding="utf-8")
+
+        serial = process(
+            input_dir=self.input_dir,
+            output_dir=self.root / "cross_serial",
+            progress_every=0,
+            workers=1,
+            log=None,
+        )
+        parallel = process(
+            input_dir=self.input_dir,
+            output_dir=self.root / "cross_parallel",
+            progress_every=0,
+            workers=4,
+            log=None,
+        )
+        self.assertEqual(self._stats_dict(serial), self._stats_dict(parallel))
+        self.assertEqual(serial.teich_valid, 1)
+        self.assertEqual(serial.dedup_dropped, 0)
+        self.assertEqual(serial.filter_kept, 2)
+
+    def test_parallel_dedup_cross_file_drops_shorter(self) -> None:
+        lines = (FIXTURES_DATA / "delivery_dedup_pair.jsonl").read_text(encoding="utf-8").splitlines()
+        (self.input_dir / "aaa_longer.jsonl").write_text(lines[1] + "\n", encoding="utf-8")
+        (self.input_dir / "bbb_shorter.jsonl").write_text(lines[0] + "\n", encoding="utf-8")
+
+        serial = process(
+            input_dir=self.input_dir,
+            output_dir=self.root / "cross2_serial",
+            progress_every=0,
+            workers=1,
+            log=None,
+        )
+        parallel = process(
+            input_dir=self.input_dir,
+            output_dir=self.root / "cross2_parallel",
+            progress_every=0,
+            workers=4,
+            log=None,
+        )
+        self.assertEqual(self._stats_dict(serial), self._stats_dict(parallel))
+        self.assertEqual(serial.dedup_dropped, 1)
+        self.assertEqual(serial.drop_reasons["session_id_duplicate"], 1)
+
+    def test_parallel_dedup_tie_break_matches_serial_order(self) -> None:
+        line = (FIXTURES_DATA / "delivery_pass.jsonl").read_text(encoding="utf-8").splitlines()[0]
+        (self.input_dir / "aaa_first.jsonl").write_text(line + "\n", encoding="utf-8")
+        (self.input_dir / "bbb_second.jsonl").write_text(line + "\n", encoding="utf-8")
+
+        serial = process(
+            input_dir=self.input_dir,
+            output_dir=self.root / "tie_serial",
+            progress_every=0,
+            workers=1,
+            log=None,
+        )
+        parallel = process(
+            input_dir=self.input_dir,
+            output_dir=self.root / "tie_parallel",
+            progress_every=0,
+            workers=4,
+            log=None,
+        )
+        self.assertEqual(self._stats_dict(serial), self._stats_dict(parallel))
+        self.assertEqual(serial.dedup_dropped, 1)
+        self.assertEqual(serial.teich_valid, 1)
+
 
 class DeliveryToTeichCliTests(unittest.TestCase):
     def setUp(self) -> None:
