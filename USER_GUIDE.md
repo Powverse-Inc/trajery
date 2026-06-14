@@ -348,7 +348,7 @@ A：不会。`output_dir` 在扫描时排除。同名 trace 覆盖写入；`--cl
 A：默认启动 **fail-fast** 退出码 3。仅调试时加 `--skip-teich-validate`。
 
 **Q：能否只改规则不改 delivery_to_teich？**  
-A：可以。规则只在 `filter_traj_multi_plat.py`；主流水线通过 import 自动生效。改后运行 `python run_tests_against_vendor.py`（见 [MAINTAINER.md](MAINTAINER.md)）。
+A：可以。规则只在 `filter_traj_multi_plat.py`；主流水线通过 import 自动生效。改后运行 `python -m unittest discover -s tests -v`（见 [MAINTAINER.md](MAINTAINER.md)）。
 
 **Q：`--no-filter` 与 `--no-dedup`？**  
 A：前者跳过 R1–R7；后者跳过去重。独立开关。

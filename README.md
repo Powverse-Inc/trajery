@@ -24,7 +24,7 @@ python delivery_to_teich.py <input_dir> [<output_dir>]
 | 读者 | 文档 | 内容 |
 |------|------|------|
 | **数据 / 运维**（跑批、验收） | [USER_GUIDE.md](USER_GUIDE.md) | 流程、CLI 选项、输出目录、报表字段、R1–R7、验收清单、FAQ |
-| **开发 / 维护**（改规则、同步 vendor、CI） | [MAINTAINER.md](MAINTAINER.md) | 代码布局、vendor 同步、测试、已知限制、文档维护映射 |
+| **开发 / 维护**（改规则、跑 CI） | [MAINTAINER.md](MAINTAINER.md) | 代码布局、规则修改、测试、已知限制、文档维护映射 |
 
 ### 常用跳转
 
@@ -35,7 +35,7 @@ python delivery_to_teich.py <input_dir> [<output_dir>]
 | incomplete / invalid 含义 | [USER_GUIDE §6.1](USER_GUIDE.md#61-输出目录) · [FAQ](USER_GUIDE.md#10-常见问题) |
 | R1–R7 筛选规则 | [USER_GUIDE §7](USER_GUIDE.md#7-七条筛选规则r1r7) |
 | 退出码 | [USER_GUIDE §11](USER_GUIDE.md#11-退出码) |
-| 改规则后如何同步 | [MAINTAINER §同步流程](MAINTAINER.md#同步流程) |
+| 改规则后如何验证 | [MAINTAINER §修改规则流程](MAINTAINER.md#修改规则流程) |
 
 ---
 
@@ -61,7 +61,6 @@ python filter_traj_multi_plat.py <input_dir> [<output_dir>]
 
 ```bash
 python -m unittest discover -s tests -v
-python run_tests_against_vendor.py
 ```
 
 测试样本在 `fixtures/data/`；重新生成：`python fixtures/build_fixtures.py`。

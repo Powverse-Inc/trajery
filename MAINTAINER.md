@@ -1,14 +1,14 @@
 # trajery 维护说明
 
-> **读者**：改规则、同步 vendor、跑 CI、改流水线代码的维护者。  
+> **读者**：改规则、跑 CI、改流水线代码的维护者。  
 > **跑批与验收**见 [USER_GUIDE.md](USER_GUIDE.md)；**快速入门**见 [README.md](README.md)。
 
 ---
 
 ## 目录
 
-1. [与采购工具链的关系](#与采购工具链的关系)
-2. [同步流程](#同步流程)
+1. [筛选规则模块](#筛选规则模块)
+2. [修改规则流程](#修改规则流程)
 3. [代码布局](#代码布局)
 4. [测试资产](#测试资产)
 5. [已知限制](#已知限制)
@@ -17,35 +17,29 @@
 
 ---
 
-## 与采购工具链的关系
+## 筛选规则模块
 
-[`filter_traj_multi_plat.py`](filter_traj_multi_plat.py) 是采购分包
-[`traj_procurement_vendor_filter/multi_platform_traj_filter.py`](../traj_procurement_vendor_filter/multi_platform_traj_filter.py)
-的 **vendor 副本**，供 [`delivery_to_teich.py`](delivery_to_teich.py) / `trajery.pipeline` import 使用。
+[`filter_traj_multi_plat.py`](filter_traj_multi_plat.py) 是本仓库内 **R1–R7 筛选规则的唯一实现**：
 
-以下逻辑必须与上游保持 **byte-compatible**（代码注释中有标注）：
+- 被 [`delivery_to_teich.py`](delivery_to_teich.py) / `trajery.pipeline` 在 scan 阶段 import（`extract`、`evaluate`、`compute_session_id`）
+- 也可作为独立 CLI，处理原始 API 日志（`*.json`），见 [USER_GUIDE §4.4](USER_GUIDE.md#44-独立多平台-filter-cli)
 
-- `canonicalize_trajectory` / `compute_session_id` ↔ `tools/traj_procurement/format/session_id.py`
-- 归一化字段 ↔ `tools/traj_procurement/format/unified_format.py`
-
-若仓库中存在 `tools/traj_procurement/`，优先在那里修改规则，再同步到本目录。
+规则、session 归一化与 `compute_session_id` 逻辑均在此单文件中维护，**无需引用本仓库以外的包或目录**。
 
 ---
 
-## 同步流程
+## 修改规则流程
 
-1. 在 `tools/traj_procurement/filter/` 或 vendor 包中修改规则 / session_id 逻辑
-2. 将变更复制到 `filter_traj_multi_plat.py`（或运行 vendor 包的 `build_single_file.py`）
-3. 运行：
+1. 直接编辑 [`filter_traj_multi_plat.py`](filter_traj_multi_plat.py)（规则函数、`extract()`、`canonicalize_trajectory`、`compute_session_id` 等）
+2. 若新增或变更 `drop_reason`，在 [`fixtures/build_fixtures.py`](fixtures/build_fixtures.py) 中补充 delivery 信封样例，并更新 [`tests/test_filter_rules.py`](tests/test_filter_rules.py)（如需要）
+3. 运行测试：
 
    ```bash
    cd powverse/trajery
-   python run_tests_against_vendor.py
    python -m unittest discover -s tests -v
    ```
 
-4. 若 vendor `examples/` 有新增 drop reason，在 `fixtures/build_fixtures.py` 中补充 delivery 信封样例
-5. 若新增 CLI 选项、报表字段或输出目录，同步更新 [USER_GUIDE.md](USER_GUIDE.md) 与 [README.md](README.md)（见 [文档维护映射](#文档维护映射)）
+4. 若改动影响 CLI、报表或输出目录，同步更新 [USER_GUIDE.md](USER_GUIDE.md) 与 [README.md](README.md)（见 [文档维护映射](#文档维护映射)）
 
 ---
 
@@ -60,7 +54,7 @@
 | `trajery/pipeline_scan.py` | 并行 scan worker（`--workers > 1`） |
 | `trajery/parser/` | delivery 扫描、unwrap、SSE/chunk 解析 |
 | `trajery/export/codex.py` | Codex JSONL 写出与 Teich 校验 |
-| `filter_traj_multi_plat.py` | R1–R7 规则（vendor 副本，根目录便于同步） |
+| `filter_traj_multi_plat.py` | R1–R7 规则与 session_id（单文件、stdlib-only） |
 | `tests/` | 单元与端到端测试 |
 | `fixtures/data/` | 合成 `.jsonl` / `.tar.gz` 样本 |
 
@@ -75,7 +69,6 @@
 | `tests/test_filter_rules.py` | R1–R7 单规则 |
 | `tests/test_delivery_to_teich.py` | 端到端、报表、`--strict-empty`、`--clean-output`、并行 scan |
 | `tests/test_teich_exporter.py` | Codex 导出与 Teich 校验 |
-| `run_tests_against_vendor.py` | 与 vendor filter 在 13 个 examples 上对比 |
 
 重新生成 fixtures：`python fixtures/build_fixtures.py`
 
@@ -115,7 +108,7 @@
 |------|------|----------|
 | [README.md](README.md) | 入口、快速开始、文档导航 | 新增顶层能力、改默认行为、改测试命令 |
 | [USER_GUIDE.md](USER_GUIDE.md) | 操作手册（流程、CLI、输出、规则、验收、FAQ） | 改 CLI 选项、输出结构、报表字段、R1–R7、退出码 |
-| [MAINTAINER.md](MAINTAINER.md) | 开发维护（同步、布局、测试、限制） | 改代码布局、vendor 同步、测试资产、架构限制 |
+| [MAINTAINER.md](MAINTAINER.md) | 开发维护（规则、布局、测试、限制） | 改代码布局、筛选规则、测试资产、架构限制 |
 
 ### 代码注释中的文档引用
 

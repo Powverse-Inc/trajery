@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Cross-platform trajectory filter — single-file, stdlib-only.
 
-Self-contained vendor package. No third-party dependencies, no package layout:
-just one ``.py`` file.
+Self-contained module shipped with trajery. No third-party dependencies:
+one ``.py`` file, edited and tested within this repository.
 
 Usage
 -----
@@ -1013,8 +1013,7 @@ def _convert_anthropic_tools(tools: list[dict]) -> list[dict]:
 def canonicalize_trajectory(t: Trajectory) -> tuple[list[dict], list[dict]]:
     """Return (messages, tools) in canonical OpenAI Chat shape for hashing.
 
-    The session_id MD5 inputs come straight from this — keep in sync with
-    tools/traj_procurement/format/unified_format.py.
+    The session_id MD5 inputs come straight from this output.
     """
     fmt = t.get("format") or "unknown"
     raw_messages = t.get("messages") or []
@@ -1137,7 +1136,6 @@ def compute_session_id(t: Trajectory) -> str | None:
     """Return ``session_<md5>`` for the trajectory's canonical shape.
 
     Returns ``None`` if the trajectory is unknown / unhashable (no messages).
-    Byte-compatible with tools/traj_procurement/format/session_id.py.
     """
     messages, tools = canonicalize_trajectory(t)
     if not messages:
