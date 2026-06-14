@@ -31,9 +31,9 @@ import shutil
 import time
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from filter_traj_multi_plat import compute_session_id, evaluate, extract
 from trajery.export import (
@@ -49,6 +49,20 @@ from trajery.parser import (
     session_key_from_record,
     unwrap_delivery_record,
 )
+
+
+@dataclass
+class TeichTraceResult:
+    """单条 trace 的 Teich 校验结果 / Per-trace Teich validation outcome."""
+
+    filename: str
+    session_key: str
+    status: Literal["valid", "incomplete", "invalid"]
+    error: str | None = None
+    trace_type: str | None = None
+    messages_count: int | None = None
+    tools_count: int | None = None
+    last_relevant_role: str | None = None
 
 
 @dataclass
@@ -69,6 +83,8 @@ class PipelineStats:
     - ``teich_invalid``: 转换失败 → ``invalid/``
     - ``teich_errors``: invalid 错误消息 Counter
     - ``tar_warnings``: 多成员 tar 告警 → ``report.tar_warnings``
+    - ``teich_trace_results``: 逐条 Teich 校验明细 → ``report.teich_trace_results``
+    - ``elapsed_seconds``: 总耗时 → ``report.elapsed_seconds``
 
     English: Counters map to report.json and output subdirectories.
     See USER_GUIDE §6.3 for metric relationships.
@@ -88,17 +104,44 @@ class PipelineStats:
     drop_reasons: Counter = field(default_factory=Counter)
     teich_errors: Counter = field(default_factory=Counter)
     tar_warnings: list[dict[str, Any]] = field(default_factory=list)
+    teich_trace_results: list[TeichTraceResult] = field(default_factory=list)
+    elapsed_seconds: float = 0.0
 
-    def to_report(self, *, input_dir: Path, output_dir: Path) -> dict[str, Any]:
+    def to_report(
+        self,
+        *,
+        input_dir: Path,
+        output_dir: Path,
+        include_valid_files: bool = False,
+    ) -> dict[str, Any]:
         """序列化为 report.json 字典 / Serialize stats to report.json schema.
 
         中文：字段与 USER_GUIDE §6.2 一一对应；``tar_*`` 字段由 ``tar_warnings`` 聚合。
+        ``teich_trace_results`` 默认仅含 incomplete/invalid；valid 用 ``valid_files_omitted`` 计数。
 
         English: Produces the JSON report dict written by CLI.
         """
-        return {
+        export_total = self.teich_valid + self.teich_incomplete + self.teich_invalid
+        funnel: dict[str, float | None] = {
+            "teich_valid_rate": (
+                round(self.teich_valid / export_total, 4) if export_total else None
+            ),
+            "teich_incomplete_rate": (
+                round(self.teich_incomplete / export_total, 4) if export_total else None
+            ),
+            "teich_invalid_rate": (
+                round(self.teich_invalid / export_total, 4) if export_total else None
+            ),
+        }
+        trace_results = self.teich_trace_results
+        if not include_valid_files:
+            trace_results = [r for r in trace_results if r.status != "valid"]
+
+        report: dict[str, Any] = {
             "input_dir": str(input_dir),
             "output_dir": str(output_dir),
+            "elapsed_seconds": round(self.elapsed_seconds, 2),
+            "export_total": export_total,
             "scanned": self.scanned,
             "parse_errors": self.parse_errors,
             "json_line_errors": self.json_line_errors,
@@ -110,6 +153,7 @@ class PipelineStats:
             "teich_valid": self.teich_valid,
             "teich_incomplete": self.teich_incomplete,
             "teich_invalid": self.teich_invalid,
+            "funnel": funnel,
             "drop_reasons": dict(self.drop_reasons.most_common()),
             "teich_errors": dict(self.teich_errors.most_common()),
             "tar_archives_with_multiple_jsonl": len(self.tar_warnings),
@@ -117,7 +161,11 @@ class PipelineStats:
                 len(w.get("skipped_members") or []) for w in self.tar_warnings
             ),
             "tar_warnings": self.tar_warnings,
+            "teich_trace_results": [asdict(r) for r in trace_results],
         }
+        if not include_valid_files and self.teich_valid:
+            report["valid_files_omitted"] = self.teich_valid
+        return report
 
 
 def _safe_filename(session_key: str) -> str:
@@ -191,6 +239,30 @@ def _top_drop_reasons(stats: PipelineStats, limit: int = 5) -> str:
         return "(none)"
     parts = [f"{reason}={count}" for reason, count in stats.drop_reasons.most_common(limit)]
     return ", ".join(parts)
+
+
+def _append_teich_trace_result(
+    stats: PipelineStats,
+    *,
+    trace_path: Path,
+    session_key: str,
+    status: Literal["valid", "incomplete", "invalid"],
+    validation: dict[str, Any],
+    error: str | None = None,
+) -> None:
+    """Record per-trace Teich validation details for reporting."""
+    stats.teich_trace_results.append(
+        TeichTraceResult(
+            filename=trace_path.name,
+            session_key=session_key,
+            status=status,
+            error=error if error is not None else validation.get("error"),
+            trace_type=validation.get("trace_type"),
+            messages_count=validation.get("messages_count"),
+            tools_count=validation.get("tools_count"),
+            last_relevant_role=validation.get("last_relevant_role"),
+        )
+    )
 
 
 def _run_parallel_scan(
@@ -561,6 +633,14 @@ def process(
             stats.teich_invalid += 1
             err = validation.get("error") or "unknown"
             stats.teich_errors[str(err)] += 1
+            _append_teich_trace_result(
+                stats,
+                trace_path=trace_path,
+                session_key=session_key,
+                status="invalid",
+                validation=validation,
+                error=str(err),
+            )
             if log:
                 log(f"[export] invalid {trace_path.name}: {err}")
             invalid_path = invalid_dir / trace_path.name
@@ -569,6 +649,13 @@ def process(
                 trace_path.unlink()
         elif not validation.get("complete"):
             stats.teich_incomplete += 1
+            _append_teich_trace_result(
+                stats,
+                trace_path=trace_path,
+                session_key=session_key,
+                status="incomplete",
+                validation=validation,
+            )
             if log:
                 log(f"[export] incomplete {trace_path.name}: not trace_is_complete")
             incomplete_path = incomplete_dir / trace_path.name
@@ -577,6 +664,13 @@ def process(
                 trace_path.unlink()
         else:
             stats.teich_valid += 1
+            _append_teich_trace_result(
+                stats,
+                trace_path=trace_path,
+                session_key=session_key,
+                status="valid",
+                validation=validation,
+            )
 
         if log and (
             export_idx == 1
@@ -611,8 +705,9 @@ def process(
                 log(f"WARNING: skipped training rows export: {exc}")
 
     # === 收尾：summary 日志 / Final summary logging ===
+    stats.elapsed_seconds = time.monotonic() - started
     if log:
-        elapsed = time.monotonic() - started
+        elapsed = stats.elapsed_seconds
         log("=== delivery_to_teich: done ===")
         log(
             f"summary: scanned={stats.scanned} unwrapped={stats.unwrapped} "
@@ -637,6 +732,7 @@ def process(
 
 __all__ = [
     "PipelineStats",
+    "TeichTraceResult",
     "check_teich_available",
     "clean_output_subdirs",
     "process",

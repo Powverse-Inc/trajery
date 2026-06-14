@@ -383,6 +383,20 @@ def check_teich_available() -> tuple[bool, str | None]:
     return True, None
 
 
+def _last_relevant_message_role(row: dict[str, Any]) -> str | None:
+    """Return the last assistant/model/tool role in a training row, if any."""
+    messages = row.get("messages") if isinstance(row, dict) else None
+    if not isinstance(messages, list):
+        return None
+    for message in reversed(messages):
+        if not isinstance(message, dict):
+            continue
+        role = message.get("role")
+        if role in {"assistant", "model", "tool"}:
+            return str(role)
+    return None
+
+
 def validate_trace_with_teich(trace_path: Path, events: list[dict[str, Any]]) -> dict[str, Any]:
     """用 Teich API 校验 trace / Validate a trace using teich APIs.
 
@@ -393,6 +407,7 @@ def validate_trace_with_teich(trace_path: Path, events: list[dict[str, Any]]) ->
     - ``complete`` (bool): ``trace_is_complete(row)``
     - ``error`` (str|None): 失败原因
     - ``messages_count`` / ``tools_count`` (int): 成功时诊断字段
+    - ``last_relevant_role`` (str|None): 末条 assistant/model/tool 消息的 role
 
     pipeline 根据 ``ok``/``complete`` 决定文件留在 ``traces/`` 或移至
     ``incomplete/``/``invalid/``。
@@ -405,7 +420,7 @@ def validate_trace_with_teich(trace_path: Path, events: list[dict[str, Any]]) ->
 
     Returns:
         Result dict with keys ``ok``, ``trace_type``, ``complete``, ``error``,
-        and optional ``messages_count``, ``tools_count``.
+        and optional ``messages_count``, ``tools_count``, ``last_relevant_role``.
     """
     try:
         from teich import convert_trace_to_training_example, detect_trace_type, trace_is_complete
@@ -415,6 +430,7 @@ def validate_trace_with_teich(trace_path: Path, events: list[dict[str, Any]]) ->
             "trace_type": None,
             "complete": False,
             "error": f"teich not installed: {exc}",
+            "last_relevant_role": None,
         }
 
     trace_type = detect_trace_type(events)
@@ -424,6 +440,7 @@ def validate_trace_with_teich(trace_path: Path, events: list[dict[str, Any]]) ->
             "trace_type": trace_type,
             "complete": False,
             "error": f"unexpected trace_type: {trace_type}",
+            "last_relevant_role": None,
         }
 
     try:
@@ -435,6 +452,7 @@ def validate_trace_with_teich(trace_path: Path, events: list[dict[str, Any]]) ->
             "trace_type": trace_type,
             "complete": False,
             "error": str(exc),
+            "last_relevant_role": None,
         }
 
     complete = trace_is_complete(row)
@@ -445,4 +463,5 @@ def validate_trace_with_teich(trace_path: Path, events: list[dict[str, Any]]) ->
         "error": None if complete else "trace_is_complete=False",
         "messages_count": len(row.get("messages") or []),
         "tools_count": len(row.get("tools") or []),
+        "last_relevant_role": _last_relevant_message_role(row),
     }

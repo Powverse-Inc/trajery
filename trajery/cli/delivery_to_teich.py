@@ -19,6 +19,7 @@ from pathlib import Path
 
 from trajery.export import check_teich_available
 from trajery.pipeline import process
+from trajery.report import to_markdown_report
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -84,6 +85,22 @@ def main(argv: list[str] | None = None) -> int:
         "--no-report",
         action="store_true",
         help="Skip writing the stats report",
+    )
+    parser.add_argument(
+        "--report-md",
+        type=Path,
+        default=None,
+        help="Write Markdown report to this path (default: <output_dir>/report.md)",
+    )
+    parser.add_argument(
+        "--no-report-md",
+        action="store_true",
+        help="Skip writing the Markdown report",
+    )
+    parser.add_argument(
+        "--report-include-valid",
+        action="store_true",
+        help="Include valid trace filenames in report.json teich_trace_results",
     )
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument(
@@ -167,16 +184,31 @@ def main(argv: list[str] | None = None) -> int:
             args.report if args.report is not None else output_dir / "report.json"
         )
         report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_data = stats.to_report(
+            input_dir=args.input_dir,
+            output_dir=output_dir,
+            include_valid_files=args.report_include_valid,
+        )
         report_path.write_text(
-            json.dumps(
-                stats.to_report(input_dir=args.input_dir, output_dir=output_dir),
-                indent=2,
-                ensure_ascii=False,
-            ),
+            json.dumps(report_data, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
         if not args.quiet:
             log(f"report: {report_path}")
+
+        if not args.no_report_md:
+            report_md_path = (
+                args.report_md
+                if args.report_md is not None
+                else output_dir / "report.md"
+            )
+            report_md_path.parent.mkdir(parents=True, exist_ok=True)
+            report_md_path.write_text(
+                to_markdown_report(report_data),
+                encoding="utf-8",
+            )
+            if not args.quiet:
+                log(f"report: {report_md_path}")
 
     if args.strict_empty and stats.teich_valid == 0:
         return 1

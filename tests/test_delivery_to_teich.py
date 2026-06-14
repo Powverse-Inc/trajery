@@ -13,6 +13,7 @@ from tests.paths import FIXTURES_DATA
 from trajery.cli.delivery_to_teich import main
 from trajery.export import check_teich_available
 from trajery.pipeline import process
+from trajery.report import to_markdown_report
 
 
 class DeliveryToTeichProcessTests(unittest.TestCase):
@@ -101,6 +102,60 @@ class DeliveryToTeichProcessTests(unittest.TestCase):
         report = stats.to_report(input_dir=self.input_dir, output_dir=self.output_dir)
         self.assertEqual(report["tar_archives_with_multiple_jsonl"], 1)
         self.assertEqual(report["tar_skipped_jsonl_members"], 1)
+        self.assertIn("elapsed_seconds", report)
+        self.assertGreaterEqual(report["elapsed_seconds"], 0.0)
+        self.assertIn("export_total", report)
+        self.assertIn("funnel", report)
+        self.assertIn("teich_trace_results", report)
+
+    def test_passing_fixture_records_valid_trace_result(self) -> None:
+        self._copy_fixture("delivery_pass.jsonl")
+        stats = process(
+            input_dir=self.input_dir,
+            output_dir=self.output_dir,
+            progress_every=0,
+            log=None,
+        )
+        report = stats.to_report(
+            input_dir=self.input_dir,
+            output_dir=self.output_dir,
+            include_valid_files=True,
+        )
+        self.assertEqual(report["export_total"], 1)
+        self.assertEqual(len(report["teich_trace_results"]), 1)
+        self.assertEqual(report["teich_trace_results"][0]["status"], "valid")
+        self.assertNotIn("valid_files_omitted", report)
+
+    def test_incomplete_trace_recorded_in_report(self) -> None:
+        self._copy_fixture("delivery_pass.jsonl")
+        incomplete_validation = {
+            "ok": True,
+            "trace_type": "codex",
+            "complete": False,
+            "error": "trace_is_complete=False",
+            "messages_count": 12,
+            "tools_count": 2,
+            "last_relevant_role": "tool",
+        }
+        with mock.patch(
+            "trajery.pipeline.validate_trace_with_teich",
+            return_value=incomplete_validation,
+        ):
+            stats = process(
+                input_dir=self.input_dir,
+                output_dir=self.output_dir,
+                progress_every=0,
+                log=None,
+            )
+        self.assertEqual(stats.teich_incomplete, 1)
+        self.assertEqual(stats.teich_valid, 0)
+        report = stats.to_report(input_dir=self.input_dir, output_dir=self.output_dir)
+        self.assertEqual(len(report["teich_trace_results"]), 1)
+        row = report["teich_trace_results"][0]
+        self.assertEqual(row["status"], "incomplete")
+        self.assertEqual(row["last_relevant_role"], "tool")
+        self.assertNotIn("valid_files_omitted", report)
+        self.assertEqual(report["funnel"]["teich_incomplete_rate"], 1.0)
 
     def test_clean_output_removes_stale_trace_files(self) -> None:
         self._copy_fixture("delivery_pass.jsonl")
@@ -351,6 +406,71 @@ class DeliveryToTeichCliTests(unittest.TestCase):
             self.assertIsNone(err)
         else:
             self.assertIsNotNone(err)
+
+    def test_cli_writes_report_json_and_markdown(self) -> None:
+        out_dir = self.output_dir / "with_report"
+        code = main([str(self.input_dir), str(out_dir), "--quiet"])
+        self.assertEqual(code, 0)
+        report_json = out_dir / "report.json"
+        report_md = out_dir / "report.md"
+        self.assertTrue(report_json.is_file())
+        self.assertTrue(report_md.is_file())
+        report = json.loads(report_json.read_text(encoding="utf-8"))
+        md = report_md.read_text(encoding="utf-8")
+        self.assertIn("funnel", report)
+        self.assertIn("teich_trace_results", report)
+        self.assertIn("# delivery_to_teich Report", md)
+        self.assertIn("## 漏斗", md)
+        self.assertIn("drop_reasons", md)
+        self.assertIn("## Teich 校验", md)
+
+    def test_cli_no_report_md_skips_markdown(self) -> None:
+        out_dir = self.output_dir / "json_only"
+        code = main(
+            [str(self.input_dir), str(out_dir), "--quiet", "--no-report-md"]
+        )
+        self.assertEqual(code, 0)
+        self.assertTrue((out_dir / "report.json").is_file())
+        self.assertFalse((out_dir / "report.md").exists())
+
+    def test_markdown_report_renders_incomplete_rows(self) -> None:
+        report = {
+            "input_dir": "/in",
+            "output_dir": "/out",
+            "elapsed_seconds": 12.5,
+            "export_total": 2,
+            "scanned": 10,
+            "parse_errors": 0,
+            "teich_valid": 1,
+            "teich_incomplete": 1,
+            "teich_invalid": 0,
+            "funnel": {
+                "teich_valid_rate": 0.5,
+                "teich_incomplete_rate": 0.5,
+                "teich_invalid_rate": 0.0,
+            },
+            "drop_reasons": {"stop_reason_tool_calls": 5},
+            "teich_errors": {},
+            "teich_trace_results": [
+                {
+                    "filename": "client_a.jsonl",
+                    "session_key": "sess-a",
+                    "status": "incomplete",
+                    "error": "trace_is_complete=False",
+                    "trace_type": "codex",
+                    "messages_count": 20,
+                    "tools_count": 3,
+                    "last_relevant_role": "tool",
+                }
+            ],
+            "valid_files_omitted": 1,
+            "tar_warnings": [],
+            "unwrap_failures": {},
+        }
+        md = to_markdown_report(report)
+        self.assertIn("client_a.jsonl", md)
+        self.assertIn("last_role", md)
+        self.assertIn("stop_reason_tool_calls", md)
 
 
 if __name__ == "__main__":

@@ -103,8 +103,11 @@ python delivery_to_teich.py --help
 | `--no-dropped` | off | 不写 `dropped/`（报表仍统计） |
 | `--keep-unwrapped` | off | 写 `unwrapped/` 中间产物 |
 | `--emit-training-rows` | off | 写 `training_rows.jsonl` |
-| `--report PATH` | `<output>/report.json` | 报表路径 |
-| `--no-report` | off | 不写报表 |
+| `--report PATH` | `<output>/report.json` | JSON 报表路径 |
+| `--report-md PATH` | `<output>/report.md` | Markdown 报表路径 |
+| `--no-report` | off | 不写 JSON / Markdown 报表 |
+| `--no-report-md` | off | 不写 Markdown 报表（仍写 JSON） |
+| `--report-include-valid` | off | `report.json` 的 `teich_trace_results` 包含 valid 文件 |
 | `--quiet` | off | 静默 |
 | `--progress-every N` | `100` | 扫描心跳间隔；`0` 关闭 |
 | `--clean-output` | off | 跑批前清空 `traces/`、`incomplete/`、`invalid/`、`dropped/`、`unwrapped/` |
@@ -166,15 +169,25 @@ python filter_traj_multi_plat.py <input_dir> [<output_dir>] \
     dropped/             ← R1–R7 或 dedup 淘汰（--no-dropped 时不写）
     unwrapped/           ← --keep-unwrapped
     training_rows.jsonl  ← --emit-training-rows
-    report.json          ← 默认统计报表
+    report.json          ← 默认 JSON 统计报表
+    report.md            ← 默认 Markdown 可读报表
 ```
 
-Teich 校验：期望 `trace_type=codex`，且 `trace_is_complete`。未安装 teich 时默认**启动即退出**；加 `--skip-teich-validate` 才跳过。
+Teich 校验：期望 `trace_type=codex`，且 `trace_is_complete`（末条 assistant/model/tool 消息不能是 `tool` role）。未安装 teich 时默认**启动即退出**；加 `--skip-teich-validate` 才跳过。
+
+- **invalid**：Teich 转换失败（`ok=False`）→ `invalid/`
+- **incomplete**：转换成功但 `trace_is_complete=False` → `incomplete/`（对话停在工具返回后、尚无最终 assistant 回复）
+- **valid**：转换成功且完整 → `traces/`（验收优先看此目录）
 
 ### 6.2 `report.json` 字段
 
 | 字段 | 含义 |
 |------|------|
+| `elapsed_seconds` | 总耗时（秒） |
+| `export_total` | 进入 Teich 校验的 trace 数（valid + incomplete + invalid） |
+| `funnel` | Teich 校验转化率：`teich_valid_rate` 等 |
+| `teich_trace_results` | 逐条 Teich 校验明细（默认仅 incomplete/invalid） |
+| `valid_files_omitted` | 未写入 `teich_trace_results` 的 valid 条数 |
 | `scanned` | 扫描行数 |
 | `parse_errors` | 解析 / unwrap 失败总数 |
 | `json_line_errors` | JSON 行非法（非 dict） |
@@ -190,7 +203,19 @@ Teich 校验：期望 `trace_type=codex`，且 `trace_is_complete`。未安装 t
 | `drop_reasons` | 淘汰原因计数 |
 | `teich_errors` | Teich 错误计数 |
 
-### 6.3 指标关系
+`teich_trace_results` 每项字段：`filename`、`session_key`、`status`（`valid`/`incomplete`/`invalid`）、`error`、`trace_type`、`messages_count`、`tools_count`、`last_relevant_role`。
+
+### 6.3 `report.md`
+
+默认与 `report.json` 同目录生成，包含：
+
+- 运行信息与验收 checklist
+- 漏斗表（scanned → export → valid/incomplete/invalid）
+- `drop_reasons` 表（含中文说明）
+- incomplete / invalid 逐文件清单
+- tar 告警与 unwrap 失败（若有）
+
+### 6.4 指标关系
 
 ```text
 scanned
@@ -271,7 +296,7 @@ scanned
 - [ ] `teich_valid > 0`
 - [ ] `drop_reasons` 分布符合预期（大量 `stop_reason_tool_calls` 通常正常）
 - [ ] 抽查 `traces/*.jsonl` 首行含 `session_meta`，Teich 可 `convert_trace_to_training_example`
-- [ ] 归档 `report.json` 与脚本版本
+- [ ] 归档 `report.json`、`report.md` 与脚本版本
 - [ ] 重复跑批：建议 `--clean-output`；`output/` 已自动排除扫描
 
 ---
@@ -280,6 +305,9 @@ scanned
 
 **Q：`filter_kept` 为何远大于 `teich_valid`？**  
 A：同一 session 多条快照经 dedup 合并；且 incomplete trace 不进 `traces/`。
+
+**Q：为何有 incomplete？已通过 R5 为何还不完整？**  
+A：R5 检查单条 delivery response 的 `stop_reason`；Teich `trace_is_complete` 检查**整段转换后 messages** 的末条 relevant role。能通过 R5 的记录，仍可能因 Codex 转换后的消息序列以 `tool` 结尾而 incomplete（例如 session 最长快照仍停在工具链中间）。
 
 **Q：重复运行会处理上次 output 吗？**  
 A：不会。`output_dir` 在扫描时排除。同名 trace 覆盖写入；`--clean-output` 可清空输出子目录。

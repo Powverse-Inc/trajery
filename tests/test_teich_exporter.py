@@ -57,6 +57,7 @@ class TeichExporterTests(unittest.TestCase):
                 self.skipTest(err)
             self.assertTrue(result.get("ok"))
             self.assertTrue(result.get("complete"))
+            self.assertIn("last_relevant_role", result)
 
 
 if __name__ == "__main__":
