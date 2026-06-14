@@ -1,4 +1,14 @@
-"""CLI for the delivery → Teich trace pipeline."""
+"""delivery → Teich trace 流水线 CLI 入口 / CLI for the delivery → Teich trace pipeline.
+
+中文：
+- 命令行薄包装，解析参数后调用 ``trajery.pipeline.process``。
+- 日志输出到 stderr；报表写入 ``report.json``（默认 ``<output_dir>/report.json``）。
+- 退出码见 USER_GUIDE §11：0 成功、1 strict-empty、2 input_dir 无效、3 teich 未安装。
+
+English:
+- Thin CLI wrapper around ``process()``; logs to stderr.
+- Exit codes: 0 ok, 1 strict-empty, 2 bad input_dir, 3 teich missing.
+"""
 
 from __future__ import annotations
 
@@ -12,9 +22,23 @@ from trajery.pipeline import process
 
 
 def main(argv: list[str] | None = None) -> int:
+    """CLI 主入口 / Command-line entry point for delivery_to_teich.
+
+    中文：解析参数 → 校验 teich → 调用 ``process()`` → 写 report → 返回退出码。
+
+    English: Parses args, validates teich, runs pipeline, writes report.
+
+    Args:
+        argv: Optional argument list (defaults to ``sys.argv[1:]``).
+
+    Returns:
+        Exit code: 0 success, 1 strict-empty, 2 bad input_dir, 3 teich missing.
+    """
     parser = argparse.ArgumentParser(
         description="Convert delivery logs to Teich Codex traces."
     )
+
+    # --- 位置参数 / Positional arguments ---
     parser.add_argument(
         "input_dir", type=Path, help="Directory with *.jsonl or *.tar.gz delivery logs"
     )
@@ -25,8 +49,12 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Output directory (default: <input_dir>/output)",
     )
+
+    # --- 限流 / Rate limits (debug) ---
     parser.add_argument("--limit-files", type=int, default=None)
     parser.add_argument("--limit-records", type=int, default=None)
+
+    # --- 流水线开关 / Pipeline toggles ---
     parser.add_argument("--no-filter", action="store_true", help="Skip R1-R7 filter")
     parser.add_argument("--no-dedup", action="store_true", help="Skip session_id dedup")
     parser.add_argument(
@@ -39,6 +67,8 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Write unwrapped openai_responses JSONL",
     )
+
+    # --- 输出与报表 / Output and reporting ---
     parser.add_argument(
         "--emit-training-rows",
         action="store_true",
@@ -67,6 +97,8 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Clear traces/, incomplete/, invalid/, dropped/, unwrapped/ before running",
     )
+
+    # --- Teich / Validation ---
     parser.add_argument(
         "--skip-teich-validate",
         action="store_true",
@@ -81,6 +113,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ERROR: input_dir is not a directory: {args.input_dir}", file=sys.stderr)
         return 2
 
+    # Fail-fast: teich required unless --skip-teich-validate (exit code 3).
     if not args.skip_teich_validate:
         teich_ok, teich_err = check_teich_available()
         if not teich_ok:
@@ -121,6 +154,7 @@ def main(argv: list[str] | None = None) -> int:
         log=None if args.quiet else log,
     )
 
+    # Write report.json via stats.to_report().
     if not args.no_report:
         report_path = (
             args.report if args.report is not None else output_dir / "report.json"
