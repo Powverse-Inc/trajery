@@ -8,7 +8,7 @@ Usage
 See README.md and USER_GUIDE.md for full documentation.
 """
 
-from trajery.cli.teich import main
+from trajery.cli.delivery_to_teich import main
 
 if __name__ == "__main__":
     raise SystemExit(main())

@@ -34,7 +34,7 @@
 | 路径 | 说明 |
 |------|------|
 | `delivery_to_teich.py` | CLI 薄入口 |
-| `trajery/cli/teich.py` | 参数解析与 `main()` |
+| `trajery/cli/delivery_to_teich.py` | 参数解析与 `main()` |
 | `trajery/pipeline.py` | `process()`、`PipelineStats` |
 | `trajery/parser/` | delivery 扫描、unwrap、SSE/chunk 解析 |
 | `trajery/export/codex.py` | Codex JSONL 写出与 Teich 校验 |
@@ -47,7 +47,7 @@
 - `fixtures/data/*.jsonl` — pass / 各 R1–R7 淘汰 / dedup / malformed
 - `fixtures/data/delivery_multi_member.tar.gz` — 多成员 tar 告警
 - `tests/test_filter_rules.py` — R1–R7 单规则
-- `tests/test_teich_run.py` — 端到端、`--strict-empty`、`--clean-output`
+- `tests/test_delivery_to_teich.py` — 端到端、`--strict-empty`、`--clean-output`
 - `run_tests_against_vendor.py` — 与 vendor filter 在 13 个 examples 上对比
 
 重新生成 fixtures：`python fixtures/build_fixtures.py`

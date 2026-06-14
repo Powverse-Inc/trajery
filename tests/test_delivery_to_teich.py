@@ -10,12 +10,12 @@ from pathlib import Path
 from unittest import mock
 
 from tests.paths import FIXTURES_DATA
-from trajery.cli.teich import main
+from trajery.cli.delivery_to_teich import main
 from trajery.export import check_teich_available
 from trajery.pipeline import process
 
 
-class TeichRunProcessTests(unittest.TestCase):
+class DeliveryToTeichProcessTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
@@ -136,7 +136,7 @@ class TeichRunProcessTests(unittest.TestCase):
         self.assertEqual(stats.filter_dropped, 0)
 
 
-class TeichRunCliTests(unittest.TestCase):
+class DeliveryToTeichCliTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
@@ -179,14 +179,20 @@ class TeichRunCliTests(unittest.TestCase):
         self.assertEqual(code, 0)
 
     def test_missing_teich_exits_3_without_skip_flag(self) -> None:
-        with mock.patch("trajery.cli.teich.check_teich_available", return_value=(False, "no module")):
+        with mock.patch(
+            "trajery.cli.delivery_to_teich.check_teich_available",
+            return_value=(False, "no module"),
+        ):
             code = main(
                 [str(self.input_dir), str(self.output_dir), "--quiet", "--no-report"]
             )
         self.assertEqual(code, 3)
 
     def test_skip_teich_validate_allows_missing_teich(self) -> None:
-        with mock.patch("trajery.cli.teich.check_teich_available", return_value=(False, "no module")):
+        with mock.patch(
+            "trajery.cli.delivery_to_teich.check_teich_available",
+            return_value=(False, "no module"),
+        ):
             code = main(
                 [
                     str(self.input_dir),
