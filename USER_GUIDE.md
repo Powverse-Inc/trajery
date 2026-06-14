@@ -23,7 +23,7 @@
 
 ## 1. 工具能做什么
 
-处理 **GPT-5.5 等模型**的 delivery 日志（`*.tar.gz` / `*.jsonl`），输出 Teich 可直接消费的 **Codex 原生 trace JSONL**（每行一个事件：`session_meta`、`response_item` 等）。
+处理 **GPT-5.5 等模型**的 delivery 日志（`*.jsonl` / `*.jsonl.gz` / `*.tar.gz`），输出 Teich 可直接消费的 **Codex 原生 trace JSONL**（每行一个事件：`session_meta`、`response_item` 等）。
 
 **流水线**：解包信封 → R1–R7 筛选（默认）→ session 去重（默认，保留 messages 最长）→ Codex 事件导出 → Teich 校验 → `report.json` + `report.md`。
 
@@ -37,6 +37,7 @@
 flowchart TB
   subgraph input [输入]
     tarGz["*.tar.gz"]
+    jsonlGz["*.jsonl.gz"]
     jsonlIn["*.jsonl"]
   end
 
@@ -62,6 +63,7 @@ flowchart TB
   end
 
   tarGz --> iter
+  jsonlGz --> iter
   jsonlIn --> iter
   iter --> unwrap --> filter
   filter -->|淘汰| dropped
@@ -165,6 +167,7 @@ python filter_traj_multi_plat.py <input_dir> [<output_dir>] \
 
 | 限制 | 说明 |
 |------|------|
+| **jsonl.gz 流式读取** | `*.jsonl.gz` 通过 `gzip.open` 逐行解压，不写入临时 `.jsonl` 文件 |
 | **tar.gz 单成员** | 每个 `.tar.gz` 只读取**第一个** `.jsonl` 成员；多成员时在日志与报表 `tar_warnings` 中告警 |
 | **dedup 内存** | 默认在内存中缓冲每个 session 的最长快照；超大目录需注意内存 |
 | **并行 scan** | `--workers > 1` 时按源文件并行；机械硬盘建议 `2~4`，NVMe 可用 CPU 核心数；`--limit-records` 时强制串行 |

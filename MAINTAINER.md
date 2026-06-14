@@ -56,7 +56,7 @@
 | `trajery/export/codex.py` | Codex JSONL 写出与 Teich 校验 |
 | `filter_traj_multi_plat.py` | R1–R7 规则与 session_id（单文件、stdlib-only） |
 | `tests/` | 单元与端到端测试 |
-| `fixtures/data/` | 合成 `.jsonl` / `.tar.gz` 样本 |
+| `fixtures/data/` | 合成 `.jsonl` / `.jsonl.gz` / `.tar.gz` 样本 |
 
 ---
 
@@ -65,6 +65,7 @@
 | 资产 | 用途 |
 |------|------|
 | `fixtures/data/*.jsonl` | pass / 各 R1–R7 淘汰 / dedup / malformed |
+| `fixtures/data/delivery_pass.jsonl.gz` | gzip 压缩 JSONL 扫描样例 |
 | `fixtures/data/delivery_multi_member.tar.gz` | 多成员 tar 告警 |
 | `tests/test_filter_rules.py` | R1–R7 单规则 |
 | `tests/test_delivery_to_teich.py` | 端到端、报表、`--strict-empty`、`--clean-output`、并行 scan |

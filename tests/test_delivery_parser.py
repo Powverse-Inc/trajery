@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 import json
 import shutil
 import tempfile
@@ -180,6 +181,26 @@ class FixtureIntegrationTests(unittest.TestCase):
         self.assertEqual(classify_unwrap_failure(json.loads(lines[0])), "request_not_string")
         self.assertEqual(classify_unwrap_failure(json.loads(lines[1])), "request_not_string")
         self.assertEqual(classify_unwrap_failure(json.loads(lines[2])), "response_parse_error")
+
+    def test_jsonl_gz_fixture_is_discovered_and_parsed(self) -> None:
+        gz_path = FIXTURES_DATA / "delivery_pass.jsonl.gz"
+        self.assertTrue(gz_path.is_file(), "run fixtures/build_fixtures.py to generate delivery_pass.jsonl.gz")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            shutil.copy(gz_path, root / "delivery_pass.jsonl.gz")
+            sources = list(iter_delivery_sources(root))
+            self.assertEqual(len(sources), 1)
+            self.assertEqual(sources[0][0], "delivery_pass.jsonl.gz")
+
+            records = list(iter_delivery_records(root))
+            self.assertEqual(len(records), 1)
+            self.assertIsNotNone(records[0]["record"])
+
+        plain_line = (FIXTURES_DATA / "delivery_pass.jsonl").read_text(encoding="utf-8").splitlines()[0]
+        with gzip.open(gz_path, "rt", encoding="utf-8") as fp:
+            gz_line = fp.readline().rstrip("\n")
+        self.assertEqual(json.loads(gz_line), json.loads(plain_line))
 
 
 if __name__ == "__main__":

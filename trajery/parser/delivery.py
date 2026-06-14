@@ -10,12 +10,12 @@ Parse distillXC delivery logs into openai_responses records.
   - ``model`` / ``requested_model``: 模型 ID
   - ``input`` / ``output`` (int?): token 计数
   - ``stop_reason`` / ``trajectory_state``: 写入 ``_provenance``；R5 以 extract 结果为准
-- 上游：``*.jsonl`` / ``*.tar.gz`` 文件；下游：``pipeline.process``、``response_sse.parse_delivery_response``
+- 上游：``*.jsonl`` / ``*.jsonl.gz`` / ``*.tar.gz`` 文件；下游：``pipeline.process``、``response_sse.parse_delivery_response``
 - 已知限制：每个 ``.tar.gz`` 仅读取第一个 ``.jsonl`` 成员（见 MAINTAINER、USER_GUIDE §5）
 
 English:
 - Parser layer: scans delivery files, unwraps L0 envelopes into L1 openai_responses records.
-- Consumes ``*.jsonl`` and ``*.tar.gz``; delegates ``response`` parsing to ``response_sse``.
+- Consumes ``*.jsonl``, ``*.jsonl.gz``, and ``*.tar.gz``; delegates ``response`` parsing to ``response_sse``.
 - Tar archives: only the first ``.jsonl`` member is read; multi-member archives emit warnings.
 
 iter_delivery_records yield shape::
@@ -25,6 +25,7 @@ iter_delivery_records yield shape::
 
 from __future__ import annotations
 
+import gzip
 import json
 import tarfile
 from collections.abc import Iterable, Iterator
@@ -32,6 +33,30 @@ from pathlib import Path
 from typing import Any
 
 from trajery.parser.response_sse import parse_delivery_response
+
+
+def _parse_jsonl_line(
+    line_no: int,
+    raw: str,
+) -> tuple[int, dict[str, Any] | None, str | None] | None:
+    """解析单行 JSONL / Parse one JSONL line.
+
+    中文：空行返回 ``None``；否则 yield ``(line_no, dict|None, raw_line)``。
+
+    English: Returns ``None`` for blank lines; otherwise a parse result tuple.
+    """
+    line = raw.rstrip("\n")
+    if not line.strip():
+        return None
+    try:
+        obj = json.loads(line)
+    except json.JSONDecodeError:
+        # JSON line parse failure → record=None for upstream json_line_errors.
+        return line_no, None, line
+    if not isinstance(obj, dict):
+        # Valid JSON but not a delivery envelope object.
+        return line_no, None, line
+    return line_no, obj, line
 
 
 def _iter_jsonl_lines(path: Path) -> Iterator[tuple[int, dict[str, Any] | None, str | None]]:
@@ -45,20 +70,18 @@ def _iter_jsonl_lines(path: Path) -> Iterator[tuple[int, dict[str, Any] | None, 
     """
     with path.open("r", encoding="utf-8", errors="replace") as fp:
         for line_no, raw in enumerate(fp, start=1):
-            line = raw.rstrip("\n")
-            if not line.strip():
-                continue
-            try:
-                obj = json.loads(line)
-            except json.JSONDecodeError:
-                # JSON line parse failure → record=None for upstream json_line_errors.
-                yield line_no, None, line
-                continue
-            if not isinstance(obj, dict):
-                # Valid JSON but not a delivery envelope object.
-                yield line_no, None, line
-                continue
-            yield line_no, obj, line
+            parsed = _parse_jsonl_line(line_no, raw)
+            if parsed is not None:
+                yield parsed
+
+
+def _iter_gzip_jsonl_lines(path: Path) -> Iterator[tuple[int, dict[str, Any] | None, str | None]]:
+    """逐行读取 gzip 压缩的 JSONL 文件 / Iterate gzip-compressed JSONL lines."""
+    with gzip.open(path, "rt", encoding="utf-8", errors="replace") as fp:
+        for line_no, raw in enumerate(fp, start=1):
+            parsed = _parse_jsonl_line(line_no, raw)
+            if parsed is not None:
+                yield parsed
 
 
 def _tar_jsonl_member_names(archive: tarfile.TarFile) -> list[str]:
@@ -110,18 +133,12 @@ def _iter_tar_jsonl_lines(
     if extracted is None:
         return
     for line_no, raw in enumerate(extracted, start=1):
-        line = raw.decode("utf-8", errors="replace").rstrip("\n")
-        if not line.strip():
-            continue
-        try:
-            obj = json.loads(line)
-        except json.JSONDecodeError:
-            yield line_no, None, line
-            continue
-        if not isinstance(obj, dict):
-            yield line_no, None, line
-            continue
-        yield line_no, obj, line
+        parsed = _parse_jsonl_line(
+            line_no,
+            raw.decode("utf-8", errors="replace"),
+        )
+        if parsed is not None:
+            yield parsed
 
 
 def _iter_tar_jsonl(path: Path) -> Iterator[tuple[str, int, dict[str, Any] | None, str | None]]:
@@ -170,8 +187,15 @@ def iter_records_from_source(rel: str, path: Path) -> Iterator[dict[str, Any]]:
     Yields:
         Dicts with keys ``source_file``, ``source_line``, ``record``.
     """
-    if path.suffix == ".jsonl":
-        for line_no, record, _raw in _iter_jsonl_lines(path):
+    if path.name.endswith(".jsonl.gz"):
+        line_iter = _iter_gzip_jsonl_lines(path)
+    elif path.suffix == ".jsonl":
+        line_iter = _iter_jsonl_lines(path)
+    else:
+        line_iter = None
+
+    if line_iter is not None:
+        for line_no, record, _raw in line_iter:
             yield {
                 "source_file": rel,
                 "source_line": line_no,
@@ -212,11 +236,11 @@ def iter_delivery_sources(
 ) -> Iterator[tuple[str, Path]]:
     """递归扫描 delivery 输入文件 / Recursively discover delivery input files.
 
-    中文：先 ``*.jsonl`` 后 ``*.tar.gz``，均按路径 sorted；yield ``(rel_path, Path)``；
-    ``exclude_dirs`` 下的路径跳过。
+    中文：先 ``*.jsonl``、再 ``*.jsonl.gz``、最后 ``*.tar.gz``，均按路径 sorted；
+    yield ``(rel_path, Path)``；``exclude_dirs`` 下的路径跳过。
 
-    English: Yields ``(relative_path, absolute_path)`` for jsonl then tar.gz files,
-    sorted; skips paths under ``exclude_dirs``.
+    English: Yields ``(relative_path, absolute_path)`` for jsonl, jsonl.gz, then tar.gz
+    files, sorted; skips paths under ``exclude_dirs``.
 
     Args:
         input_dir: Root directory to scan recursively.
@@ -237,7 +261,12 @@ def iter_delivery_sources(
         if _skip(path):
             continue
         yield str(path.relative_to(input_root)), path
-    # Pass 2: tar.gz archives containing JSONL members.
+    # Pass 2: gzip-compressed JSONL delivery logs.
+    for path in sorted(input_root.rglob("*.jsonl.gz")):
+        if _skip(path):
+            continue
+        yield str(path.relative_to(input_root)), path
+    # Pass 3: tar.gz archives containing JSONL members.
     for path in sorted(input_root.rglob("*.tar.gz")):
         if _skip(path):
             continue

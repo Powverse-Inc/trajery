@@ -41,7 +41,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # --- 位置参数 / Positional arguments ---
     parser.add_argument(
-        "input_dir", type=Path, help="Directory with *.jsonl or *.tar.gz delivery logs"
+        "input_dir", type=Path, help="Directory with *.jsonl, *.jsonl.gz, or *.tar.gz delivery logs"
     )
     parser.add_argument(
         "output_dir",

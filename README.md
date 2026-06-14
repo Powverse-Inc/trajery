@@ -1,6 +1,6 @@
 # trajery — Delivery Log → Teich Codex Trace
 
-将 distillXC **delivery 原始日志**（`*.tar.gz` / `*.jsonl`）清洗、筛选，并导出 **Teich 合规的 Codex Agent Trace**。
+将 distillXC **delivery 原始日志**（`*.jsonl` / `*.jsonl.gz` / `*.tar.gz`）清洗、筛选，并导出 **Teich 合规的 Codex Agent Trace**。
 
 ---
 

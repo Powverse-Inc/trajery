@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import gzip
 import io
 import json
 import sys
@@ -34,6 +35,9 @@ def main() -> None:
         DATA / "delivery_pass.jsonl",
         [wrap_delivery_record(pass_payload, request_id="client:pass-1")],
     )
+
+    with gzip.open(DATA / "delivery_pass.jsonl.gz", "wb") as fp:
+        fp.write((DATA / "delivery_pass.jsonl").read_bytes())
 
     wrong_model = passing_openai_responses_payload()
     wrong_model["model"] = "claude-3-5-sonnet-20241022"
