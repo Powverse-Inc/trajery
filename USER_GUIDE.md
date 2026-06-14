@@ -18,6 +18,7 @@
 9. [验收清单](#9-验收清单)
 10. [常见问题](#10-常见问题)
 11. [退出码](#11-退出码)
+12. [多日输出合并](#12-多日输出合并)
 
 ---
 
@@ -370,3 +371,95 @@ A：前者跳过 R1–R7；后者跳过去重。独立开关。
 | 3 | 未安装 `teich` 且未传 `--skip-teich-validate` |
 
 Teich 数据格式：[Teich 文档](https://github.com/TeichAI/teich)
+
+---
+
+## 12. 多日输出合并
+
+按日期分批跑完 `delivery_to_teich.py` 后，使用 **merge_traces** 与 **merge_reports** 合并各日 `output/` 目录。
+
+### 12.1 何时使用
+
+- 输入：含多个日期子目录的根路径（如 `<delivery_root>/20260524/`），每个子目录含 `traces/` 与 `report.json`
+- 输出：`<input_root>/merged/`（可用 `--output-dir` 覆盖）
+
+### 12.2 质量过滤（unknown-session 淘汰）
+
+早期 delivery 日志可能仅有 `logid`、无 `request_id`，导出 trace 的 `session_meta.payload.id` 为 `unknown-session`。合并阶段**一律丢弃**此类 trace（数据质量问题），不进入 `merged/traces/`。
+
+- 淘汰条件：`session_meta.payload.id` 缺失、空、或等于 `unknown-session`
+- 报表字段：`quality_filter.discarded_unknown_session`、`quality_filter.teich_valid_after_filter`
+- 主流水线代码无需修改；后续新跑批若仍产出 unknown-session，merge 同样丢弃
+
+### 12.3 命令
+
+```bash
+# 1. 合并 trace（先）
+python merge_traces.py <delivery_root> \
+  --output-dir <delivery_root>/merged \
+  --mode hardlink \
+  --progress-every 1000
+
+# 2. 合并报表（后）
+python merge_reports.py <delivery_root> \
+  --manifest <delivery_root>/merged/merge_manifest.json
+```
+
+### 12.4 merge_traces 选项
+
+| 选项 | 默认 | 说明 |
+|------|------|------|
+| `--output-dir` | `<input_root>/merged` | 合并输出根目录 |
+| `--mode` | `copy` | `copy` 或 `hardlink`（同盘省空间；源目录勿删） |
+| `--dry-run` | off | 只写 `merge_manifest.json`，不复制 trace |
+| `--include-days` | 全部 | 逗号分隔日期白名单 |
+| `--verbose-manifest` | off | manifest 含全部淘汰路径明细 |
+| `--progress-every N` | 500 | 进度心跳；0=关 |
+
+### 12.5 merge_reports 选项
+
+| 选项 | 默认 | 说明 |
+|------|------|------|
+| `--output-dir` | `<input_root>/merged` | 报表输出目录 |
+| `--manifest` | `<output-dir>/merge_manifest.json`（若存在） | 注入质量过滤与跨天 dedup 统计 |
+| `--include-days` | 全部 | 逗号分隔日期白名单 |
+
+### 12.6 输出目录
+
+```text
+<input_root>/merged/
+  traces/                  ← 质量过滤 + 跨天 dedup 后的最终 trace
+  merge_manifest.json      ← 合并审计（淘汰数、分日统计）
+  report.json              ← 聚合报表 + quality_filter + cross_day_dedup
+  report.md
+```
+
+### 12.7 报表字段（合并专有）
+
+| 字段 | 含义 |
+|------|------|
+| `report_type` | `merged_delivery_output` |
+| `per_day[]` | 分日 scanned / teich_valid / discarded / kept |
+| `quality_filter` | unknown-session 淘汰前后数量 |
+| `cross_day_dedup` | 跨天重复 session 数、`teich_valid_final` |
+| `pre_cross_day_dedup` | 合并前各日 valid 合计（原始 pipeline 产出） |
+
+**验收**：`cross_day_dedup.teich_valid_final` == `merged/traces/` 文件数；`quality_filter.discarded_unknown_session` 与 manifest 一致。
+
+### 12.8 批内 dedup vs 跨天 dedup
+
+| 阶段 | 发生位置 | 报表字段 |
+|------|----------|----------|
+| 批内 dedup | 各日 `delivery_to_teich.py` | 每日 `dedup_dropped` |
+| 质量过滤 | `merge_traces` | `quality_filter.*` |
+| 跨天 dedup | `merge_traces` | `cross_day_dedup.*` |
+
+---
+
+## 13. 安全注意事项
+
+- **输出目录**：`traces/`、`dropped/`、`unwrapped/` 等可能含完整对话与 API 载荷，请设严格文件权限，勿提交 Git（`output/` 已在 `.gitignore`）。
+- **读取上限**：单文件、tar 成员、JSONL 行统一 **4 GiB** 上限；超限会跳过并在 stderr 输出 `WARN` 日志，同时记入 `size_warnings` / `parse_errors`。
+- **Teich 校验**：`--skip-teich-validate` 仅用于本地调试；CI 与验收流水线请勿使用。
+- **合并 manifest**：`--verbose-manifest` 可能含路径信息，对外共享前请检查。
+- **报表路径**：默认 `report.json` / `merge_manifest.json` 使用相对路径；需要绝对路径时传 `--report-absolute-paths`。

@@ -1151,10 +1151,27 @@ def compute_session_id(t: Trajectory) -> str | None:
 # =============================================================================
 
 def _iter_files(in_dir: Path, glob_pattern: str) -> Iterable[Path]:
-    yield from in_dir.rglob(glob_pattern)
+    from trajery.paths import is_under_root
+
+    root = in_dir.resolve()
+    for path in in_dir.rglob(glob_pattern):
+        if is_under_root(path, root):
+            yield path
 
 
 def _load(path: Path) -> dict | None:
+    from trajery.paths import check_read_size
+
+    try:
+        file_size = path.stat().st_size
+    except OSError:
+        return None
+    if not check_read_size(str(path), file_size, "file"):
+        print(
+            f"WARN: skipped {path} — file exceeds MAX_READ_BYTES (4 GiB)",
+            file=sys.stderr,
+        )
+        return None
     try:
         return json.loads(path.read_text())
     except Exception:
@@ -1201,6 +1218,11 @@ def main(argv: list[str] | None = None) -> int:
                    help="Stop after scanning this many files (debug aid).")
     p.add_argument("--strict-empty", action="store_true",
                    help="Exit non-zero if 0 files passed.")
+    p.add_argument(
+        "--report-absolute-paths",
+        action="store_true",
+        help="Write absolute paths in --report JSON (default: relative to cwd)",
+    )
     p.add_argument("--quiet", action="store_true",
                    help="Suppress the printed stats summary.")
     p.add_argument(
@@ -1352,9 +1374,15 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  {n:>6}  {reason}")
 
     if args.report is not None:
+        from trajery.paths import report_path
+
         report = {
-            "input_dir":   str(args.input_dir),
-            "output_dir":  str(args.output_dir) if args.output_dir else None,
+            "input_dir": report_path(args.input_dir, absolute=args.report_absolute_paths),
+            "output_dir": (
+                report_path(args.output_dir, absolute=args.report_absolute_paths)
+                if args.output_dir
+                else None
+            ),
             "scanned":     total,
             "kept":        kept,
             "parse_errors": parse_errors,

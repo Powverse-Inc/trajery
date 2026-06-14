@@ -30,14 +30,25 @@ import json
 import tarfile
 from collections.abc import Iterable, Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from trajery.parser.response_sse import parse_delivery_response
+from trajery.paths import (
+    MAX_READ_BYTES,
+    check_read_size,
+    is_safe_tar_member,
+    is_under_root,
+    sanitize_sidecar_segment,
+)
 
 
 def _parse_jsonl_line(
     line_no: int,
     raw: str,
+    *,
+    source: str,
+    size_warnings: list[dict[str, Any]] | None = None,
+    log: Callable[[str], None] | None = None,
 ) -> tuple[int, dict[str, Any] | None, str | None] | None:
     """解析单行 JSONL / Parse one JSONL line.
 
@@ -48,6 +59,15 @@ def _parse_jsonl_line(
     line = raw.rstrip("\n")
     if not line.strip():
         return None
+    line_size = len(raw.encode("utf-8", errors="replace"))
+    if not check_read_size(
+        f"{source}:{line_no}",
+        line_size,
+        "jsonl_line",
+        log=log,
+        warnings=size_warnings,
+    ):
+        return line_no, None, line
     try:
         obj = json.loads(line)
     except json.JSONDecodeError:
@@ -59,34 +79,67 @@ def _parse_jsonl_line(
     return line_no, obj, line
 
 
-def _iter_jsonl_lines(path: Path) -> Iterator[tuple[int, dict[str, Any] | None, str | None]]:
-    """逐行读取 JSONL 文件 / Iterate JSONL lines with parse status.
-
-    中文：yield ``(line_no, dict|None, raw_line)``；``None`` 表示 JSON 解析失败
-    或解析结果非 dict。
-
-    English: Yields ``(line_no, record_or_none, raw_line)``; ``None`` record means
-    invalid JSON or non-dict payload.
-    """
+def _iter_jsonl_lines(
+    path: Path,
+    rel: str,
+    *,
+    size_warnings: list[dict[str, Any]] | None = None,
+    log: Callable[[str], None] | None = None,
+) -> Iterator[tuple[int, dict[str, Any] | None, str | None]]:
+    """逐行读取 JSONL 文件 / Iterate JSONL lines with parse status."""
+    try:
+        file_size = path.stat().st_size
+    except OSError:
+        return
+    if not check_read_size(rel, file_size, "file", log=log, warnings=size_warnings):
+        return
     with path.open("r", encoding="utf-8", errors="replace") as fp:
         for line_no, raw in enumerate(fp, start=1):
-            parsed = _parse_jsonl_line(line_no, raw)
+            parsed = _parse_jsonl_line(
+                line_no,
+                raw,
+                source=rel,
+                size_warnings=size_warnings,
+                log=log,
+            )
             if parsed is not None:
                 yield parsed
 
 
-def _iter_gzip_jsonl_lines(path: Path) -> Iterator[tuple[int, dict[str, Any] | None, str | None]]:
+def _iter_gzip_jsonl_lines(
+    path: Path,
+    rel: str,
+    *,
+    size_warnings: list[dict[str, Any]] | None = None,
+    log: Callable[[str], None] | None = None,
+) -> Iterator[tuple[int, dict[str, Any] | None, str | None]]:
     """逐行读取 gzip 压缩的 JSONL 文件 / Iterate gzip-compressed JSONL lines."""
+    try:
+        file_size = path.stat().st_size
+    except OSError:
+        return
+    if not check_read_size(rel, file_size, "gzip", log=log, warnings=size_warnings):
+        return
     with gzip.open(path, "rt", encoding="utf-8", errors="replace") as fp:
         for line_no, raw in enumerate(fp, start=1):
-            parsed = _parse_jsonl_line(line_no, raw)
+            parsed = _parse_jsonl_line(
+                line_no,
+                raw,
+                source=rel,
+                size_warnings=size_warnings,
+                log=log,
+            )
             if parsed is not None:
                 yield parsed
 
 
 def _tar_jsonl_member_names(archive: tarfile.TarFile) -> list[str]:
-    """List ``.jsonl`` member paths inside an open tar archive."""
-    return [name for name in archive.getnames() if name.endswith(".jsonl")]
+    """List safe ``.jsonl`` member paths inside an open tar archive."""
+    return [
+        name
+        for name in archive.getnames()
+        if name.endswith(".jsonl") and is_safe_tar_member(name)
+    ]
 
 
 def _tar_jsonl_meta(path: Path, members: list[str]) -> dict[str, Any]:
@@ -127,8 +180,27 @@ def inspect_tar_jsonl_members(path: Path) -> dict[str, Any]:
 def _iter_tar_jsonl_lines(
     archive: tarfile.TarFile,
     member_name: str,
+    rel: str,
+    *,
+    size_warnings: list[dict[str, Any]] | None = None,
+    log: Callable[[str], None] | None = None,
 ) -> Iterator[tuple[int, dict[str, Any] | None, str | None]]:
     """Iterate parsed JSONL lines from one tar member inside an open archive."""
+    if not is_safe_tar_member(member_name):
+        return
+    try:
+        member = archive.getmember(member_name)
+    except KeyError:
+        return
+    source = f"{rel}:{member_name}"
+    if not check_read_size(
+        source,
+        member.size,
+        "tar_member",
+        log=log,
+        warnings=size_warnings,
+    ):
+        return
     extracted = archive.extractfile(member_name)
     if extracted is None:
         return
@@ -136,37 +208,50 @@ def _iter_tar_jsonl_lines(
         parsed = _parse_jsonl_line(
             line_no,
             raw.decode("utf-8", errors="replace"),
+            source=source,
+            size_warnings=size_warnings,
+            log=log,
         )
         if parsed is not None:
             yield parsed
 
 
-def _iter_tar_jsonl(path: Path) -> Iterator[tuple[str, int, dict[str, Any] | None, str | None]]:
-    """迭代 tar 内首个 .jsonl 成员的行 / Iterate lines from the first .jsonl in tar.
-
-    中文：与 ``inspect_tar_jsonl_members`` 策略一致，仅读 ``members[0]``。
-
-    English: Same first-member-only policy as ``inspect_tar_jsonl_members``.
-    """
+def _iter_tar_jsonl(
+    path: Path,
+    rel: str,
+    *,
+    size_warnings: list[dict[str, Any]] | None = None,
+    log: Callable[[str], None] | None = None,
+) -> Iterator[tuple[str, int, dict[str, Any] | None, str | None]]:
+    """迭代 tar 内首个 .jsonl 成员的行 / Iterate lines from the first .jsonl in tar."""
     with tarfile.open(path, "r:gz") as archive:
         members = _tar_jsonl_member_names(archive)
         if not members:
             return
         member_name = members[0]
-        for line_no, record, raw in _iter_tar_jsonl_lines(archive, member_name):
+        for line_no, record, raw in _iter_tar_jsonl_lines(
+            archive,
+            member_name,
+            rel,
+            size_warnings=size_warnings,
+            log=log,
+        ):
             yield member_name, line_no, record, raw
 
 
 def iter_tar_jsonl_with_meta(
     path: Path,
+    rel: str | None = None,
+    *,
+    size_warnings: list[dict[str, Any]] | None = None,
+    log: Callable[[str], None] | None = None,
 ) -> Iterator[tuple[str, Any]]:
     """单次打开 tar：先 yield 元数据，再 yield 行记录 / Open tar once for meta + lines.
-
-    中文：在 ``with tarfile.open`` 块内完成元数据与行迭代，避免双次打开。
 
     Yields:
         ``("meta", meta_dict)`` then ``("record", source_file, line_no, record)``.
     """
+    rel_path = rel or path.name
     with tarfile.open(path, "r:gz") as archive:
         members = _tar_jsonl_member_names(archive)
         meta = _tar_jsonl_meta(path, members)
@@ -174,23 +259,43 @@ def iter_tar_jsonl_with_meta(
         if not members:
             return
         member_name = members[0]
-        for line_no, record, _raw in _iter_tar_jsonl_lines(archive, member_name):
-            yield "record", member_name, line_no, record
+        safe_member = sanitize_sidecar_segment(member_name)
+        for line_no, record, _raw in _iter_tar_jsonl_lines(
+            archive,
+            member_name,
+            rel_path,
+            size_warnings=size_warnings,
+            log=log,
+        ):
+            yield "record", f"{rel_path}:{safe_member}", line_no, record
 
 
-def iter_records_from_source(rel: str, path: Path) -> Iterator[dict[str, Any]]:
+def iter_records_from_source(
+    rel: str,
+    path: Path,
+    *,
+    size_warnings: list[dict[str, Any]] | None = None,
+    log: Callable[[str], None] | None = None,
+) -> Iterator[dict[str, Any]]:
     """逐条 yield 单个源文件（jsonl 或 tar.gz）的 delivery 记录 / Yield records from one file.
-
-    中文：tar 来源使用单次 ``tarfile.open``；``source_file`` 格式与
-    ``iter_delivery_records`` 一致。
 
     Yields:
         Dicts with keys ``source_file``, ``source_line``, ``record``.
     """
     if path.name.endswith(".jsonl.gz"):
-        line_iter = _iter_gzip_jsonl_lines(path)
+        line_iter = _iter_gzip_jsonl_lines(
+            path,
+            rel,
+            size_warnings=size_warnings,
+            log=log,
+        )
     elif path.suffix == ".jsonl":
-        line_iter = _iter_jsonl_lines(path)
+        line_iter = _iter_jsonl_lines(
+            path,
+            rel,
+            size_warnings=size_warnings,
+            log=log,
+        )
     else:
         line_iter = None
 
@@ -203,29 +308,28 @@ def iter_records_from_source(rel: str, path: Path) -> Iterator[dict[str, Any]]:
             }
         return
 
-    for kind, *payload in iter_tar_jsonl_with_meta(path):
+    for kind, *payload in iter_tar_jsonl_with_meta(
+        path,
+        rel,
+        size_warnings=size_warnings,
+        log=log,
+    ):
         if kind == "meta":
             continue
-        member_name, line_no, record = payload
+        source_file, line_no, record = payload
         yield {
-            "source_file": f"{rel}:{member_name}",
+            "source_file": source_file,
             "source_line": line_no,
             "record": record,
         }
 
 
 def _is_under(path: Path, parent: Path) -> bool:
-    """判断 path 是否在 parent 目录树下（含自身）/ True when path is under parent.
-
-    中文：用于 ``exclude_dirs`` 判断，防止 ``output_dir`` 被当作输入扫描。
-
-    English: Used to skip paths under excluded directories (e.g. output_dir).
-    """
+    """判断 path 是否在 parent 目录树下（含自身）/ True when path is under parent."""
     try:
         path.resolve().relative_to(parent.resolve())
         return True
     except ValueError:
-        # path is not a strict child; check exact match.
         return path.resolve() == parent.resolve()
 
 
@@ -234,43 +338,21 @@ def iter_delivery_sources(
     *,
     exclude_dirs: Iterable[Path] | None = None,
 ) -> Iterator[tuple[str, Path]]:
-    """递归扫描 delivery 输入文件 / Recursively discover delivery input files.
-
-    中文：先 ``*.jsonl``、再 ``*.jsonl.gz``、最后 ``*.tar.gz``，均按路径 sorted；
-    yield ``(rel_path, Path)``；``exclude_dirs`` 下的路径跳过。
-
-    English: Yields ``(relative_path, absolute_path)`` for jsonl, jsonl.gz, then tar.gz
-    files, sorted; skips paths under ``exclude_dirs``.
-
-    Args:
-        input_dir: Root directory to scan recursively.
-        exclude_dirs: Directories to exclude (e.g. previous output_dir).
-
-    Yields:
-        ``(relative_path, path)`` tuples for each delivery source file.
-    """
+    """递归扫描 delivery 输入文件 / Recursively discover delivery input files."""
     input_root = input_dir.resolve()
     excluded = [path.resolve() for path in (exclude_dirs or [])]
 
     def _skip(path: Path) -> bool:
         resolved = path.resolve()
+        if not is_under_root(resolved, input_root):
+            return True
         return any(_is_under(resolved, excluded_dir) for excluded_dir in excluded)
 
-    # Pass 1: standalone JSONL delivery logs.
-    for path in sorted(input_root.rglob("*.jsonl")):
-        if _skip(path):
-            continue
-        yield str(path.relative_to(input_root)), path
-    # Pass 2: gzip-compressed JSONL delivery logs.
-    for path in sorted(input_root.rglob("*.jsonl.gz")):
-        if _skip(path):
-            continue
-        yield str(path.relative_to(input_root)), path
-    # Pass 3: tar.gz archives containing JSONL members.
-    for path in sorted(input_root.rglob("*.tar.gz")):
-        if _skip(path):
-            continue
-        yield str(path.relative_to(input_root)), path
+    for pattern in ("*.jsonl", "*.jsonl.gz", "*.tar.gz"):
+        for path in sorted(input_root.rglob(pattern)):
+            if _skip(path):
+                continue
+            yield str(path.relative_to(input_root)), path
 
 
 def iter_delivery_records(
@@ -279,25 +361,10 @@ def iter_delivery_records(
     limit_files: int | None = None,
     exclude_dirs: Iterable[Path] | None = None,
     tar_warnings: list[dict[str, Any]] | None = None,
+    size_warnings: list[dict[str, Any]] | None = None,
+    log: Callable[[str], None] | None = None,
 ) -> Iterator[dict[str, Any]]:
-    """主扫描入口：逐条 yield delivery 记录 / Yield delivery metadata dicts.
-
-    中文：每条 yield 含 ``source_file``、``source_line``、``record``（解析成功时为 dict，
-    行级 JSON 失败时为 None）。tar 来源的 ``source_file`` 格式为 ``rel:member_name``。
-    多成员 tar 且 ``tar_warnings`` 非 None 时追加告警条目。
-
-    English: Main scan iterator; ``record`` is the parsed envelope dict or ``None``
-    on line-level parse failure. Tar sources use ``source_file="rel:member"`` format.
-
-    Args:
-        input_dir: Root directory with delivery logs.
-        limit_files: Stop after N source files (debug).
-        exclude_dirs: Directories to skip during scan.
-        tar_warnings: Optional list to collect multi-member tar warnings.
-
-    Yields:
-        Dicts with keys ``source_file``, ``source_line``, ``record``.
-    """
+    """主扫描入口：逐条 yield delivery 记录 / Yield delivery metadata dicts."""
     seen_files = 0
     for rel, path in iter_delivery_sources(input_dir, exclude_dirs=exclude_dirs):
         seen_files += 1
@@ -306,44 +373,49 @@ def iter_delivery_records(
 
         if path.name.endswith(".tar.gz"):
             tar_meta: dict[str, Any] | None = None
-            for kind, *payload in iter_tar_jsonl_with_meta(path):
+            for kind, *payload in iter_tar_jsonl_with_meta(
+                path,
+                rel,
+                size_warnings=size_warnings,
+                log=log,
+            ):
                 if kind == "meta":
                     tar_meta = payload[0]
                     if tar_meta["jsonl_member_count"] > 1 and tar_warnings is not None:
                         tar_warnings.append({**tar_meta, "source_file": rel})
                     continue
-                member_name, line_no, record = payload
+                source_file, line_no, record = payload
                 yield {
-                    "source_file": f"{rel}:{member_name}",
+                    "source_file": source_file,
                     "source_line": line_no,
                     "record": record,
                 }
+            if tar_meta is not None and tar_meta["jsonl_member_count"] == 0:
+                if size_warnings is not None:
+                    size_warnings.append(
+                        {
+                            "source_file": rel,
+                            "kind": "tar_member",
+                            "size_bytes": 0,
+                            "limit_bytes": MAX_READ_BYTES,
+                            "reason": "no_safe_jsonl_member",
+                        }
+                    )
+                if log is not None:
+                    log(f"WARN: skipped {rel} — no safe .jsonl members in tar archive")
             continue
 
-        for item in iter_records_from_source(rel, path):
+        for item in iter_records_from_source(
+            rel,
+            path,
+            size_warnings=size_warnings,
+            log=log,
+        ):
             yield item
 
 
 def classify_unwrap_failure(record: dict[str, Any]) -> str | None:
-    """预判 unwrap 是否会失败 / Return failure code when unwrap would fail.
-
-    中文：dry-run 检查，不实际构造 unwrapped 记录。失败码与 ``report.unwrap_failures`` 对应：
-
-    - ``request_not_string``: ``request`` 缺失或非 str
-    - ``request_json_error``: ``request`` 非合法 JSON
-    - ``request_not_object``: JSON 解析结果非 dict
-    - ``response_parse_error``: ``parse_delivery_response`` 返回 None
-
-    行级 ``record is None`` 不计入此处，而计入 ``json_line_errors``。
-
-    English: Pre-flight unwrap check; returns a failure code string or ``None`` if OK.
-
-    Args:
-        record: Parsed delivery envelope dict.
-
-    Returns:
-        Failure code string, or ``None`` when unwrap should succeed.
-    """
+    """预判 unwrap 是否会失败 / Return failure code when unwrap would fail."""
     request_raw = record.get("request")
     if not isinstance(request_raw, str):
         return "request_not_string"
@@ -359,32 +431,7 @@ def classify_unwrap_failure(record: dict[str, Any]) -> str | None:
 
 
 def unwrap_delivery_record(record: dict[str, Any]) -> dict[str, Any] | None:
-    """L0 delivery 信封 → L1 openai_responses 记录 / Convert envelope to openai_responses.
-
-    中文：合并 ``request`` JSON 字段与解析后的 ``response`` dict，附加
-    ``call_type="openai_responses"`` 与 ``_provenance`` 溯源块。
-
-    ``_provenance`` 字段：
-    - ``request_id`` / ``response_id``: session 标识 → session_meta.id、dedup
-    - ``usage_log_id`` / ``logid``: fallback 标识
-    - ``trajectory_state``: 诊断
-    - ``source_stop_reason``: 来自 ``stop_reason``，与 extract R5 对照
-    - ``input_tokens`` / ``output_tokens``: 来自 ``input`` / ``output`` → Codex token_count
-
-    model 合并优先级：``request.model`` → ``record.model`` → ``record.requested_model``。
-
-    English: Expands request JSON, attaches parsed response and provenance metadata.
-
-    Args:
-        record: L0 delivery envelope dict.
-
-    Returns:
-        L1 openai_responses-shaped dict, or ``None`` on failure.
-
-    See Also:
-        classify_unwrap_failure — pre-check without constructing output.
-        parse_delivery_response — parses the ``response`` string field.
-    """
+    """L0 delivery 信封 → L1 openai_responses 记录 / Convert envelope to openai_responses."""
     if classify_unwrap_failure(record) is not None:
         return None
 
@@ -394,7 +441,6 @@ def unwrap_delivery_record(record: dict[str, Any]) -> dict[str, Any] | None:
     response = parse_delivery_response(record.get("response"))
     assert response is not None
 
-    # Model ID: request body takes precedence over envelope metadata fields.
     model = request.get("model") or record.get("model") or record.get("requested_model") or ""
     return {
         **request,
@@ -415,19 +461,7 @@ def unwrap_delivery_record(record: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def session_key_from_record(record: dict[str, Any]) -> str:
-    """从 delivery 记录提取 trace 文件命名键 / Derive trace filename stem from record.
-
-    中文：fallback 链：``request_id`` → ``response_id`` → ``usage_log_id`` → ``logid``
-    → ``"unknown"``；替换 ``: / \\`` 为 ``_``（pipeline ``_safe_filename`` 二次处理）。
-
-    English: Primary session key for trace naming; sanitizes path separators.
-
-    Args:
-        record: L0 delivery envelope dict.
-
-    Returns:
-        Sanitized session key string (before ``_safe_filename`` truncation).
-    """
+    """从 delivery 记录提取 trace 文件命名键 / Derive trace filename stem from record."""
     request_id = record.get("request_id") or record.get("response_id") or record.get("usage_log_id")
     if request_id:
         safe = str(request_id).replace(":", "_").replace("/", "_").replace("\\", "_")

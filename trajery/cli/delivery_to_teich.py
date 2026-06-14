@@ -105,6 +105,11 @@ def main(argv: list[str] | None = None) -> int:
             "(default: empty; incomplete/invalid are not listed)"
         ),
     )
+    parser.add_argument(
+        "--report-absolute-paths",
+        action="store_true",
+        help="Write absolute paths in report.json (default: relative to cwd)",
+    )
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument(
         "--progress-every",
@@ -191,6 +196,7 @@ def main(argv: list[str] | None = None) -> int:
             input_dir=args.input_dir,
             output_dir=output_dir,
             include_valid_files=args.report_include_valid,
+            report_absolute_paths=args.report_absolute_paths,
         )
         report_path.write_text(
             json.dumps(report_data, indent=2, ensure_ascii=False),

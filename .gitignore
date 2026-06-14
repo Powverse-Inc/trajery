@@ -5,3 +5,8 @@ output/
 *.egg-info/
 .venv/
 venv/
+.env
+.env.*
+*.pem
+secrets/
+credentials*.json

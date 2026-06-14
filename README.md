@@ -35,6 +35,7 @@ python delivery_to_teich.py <input_dir> [<output_dir>]
 | incomplete / invalid 含义 | [USER_GUIDE §6.1](USER_GUIDE.md#61-输出目录) · [FAQ](USER_GUIDE.md#10-常见问题) |
 | R1–R7 筛选规则 | [USER_GUIDE §7](USER_GUIDE.md#7-七条筛选规则r1r7) |
 | 退出码 | [USER_GUIDE §11](USER_GUIDE.md#11-退出码) |
+| 多日输出合并 | [USER_GUIDE §12](USER_GUIDE.md#12-多日输出合并) |
 | 改规则后如何验证 | [MAINTAINER §修改规则流程](MAINTAINER.md#修改规则流程) |
 
 ---
@@ -53,6 +54,10 @@ python delivery_to_teich.py <input_dir> --strict-empty
 
 # 多平台原始 API 日志筛选（*.json，非 delivery 流水线）
 python filter_traj_multi_plat.py <input_dir> [<output_dir>]
+
+# 多日 output 合并（质量过滤 + 跨天 dedup）
+python merge_traces.py <input_root> [--output-dir <input_root>/merged] --mode hardlink
+python merge_reports.py <input_root> --manifest <input_root>/merged/merge_manifest.json
 ```
 
 ---

@@ -49,6 +49,7 @@ from trajery.parser import (
     session_key_from_record,
     unwrap_delivery_record,
 )
+from trajery.paths import report_path, write_sidecar_jsonl
 
 
 @dataclass
@@ -104,6 +105,7 @@ class PipelineStats:
     drop_reasons: Counter = field(default_factory=Counter)
     teich_errors: Counter = field(default_factory=Counter)
     tar_warnings: list[dict[str, Any]] = field(default_factory=list)
+    size_warnings: list[dict[str, Any]] = field(default_factory=list)
     teich_trace_results: list[TeichTraceResult] = field(default_factory=list)
     elapsed_seconds: float = 0.0
 
@@ -113,6 +115,7 @@ class PipelineStats:
         input_dir: Path,
         output_dir: Path,
         include_valid_files: bool = False,
+        report_absolute_paths: bool = False,
     ) -> dict[str, Any]:
         """序列化为 report.json 字典 / Serialize stats to report.json schema.
 
@@ -141,8 +144,8 @@ class PipelineStats:
         )
 
         report: dict[str, Any] = {
-            "input_dir": str(input_dir),
-            "output_dir": str(output_dir),
+            "input_dir": report_path(input_dir, absolute=report_absolute_paths),
+            "output_dir": report_path(output_dir, absolute=report_absolute_paths),
             "elapsed_seconds": round(self.elapsed_seconds, 2),
             "export_total": export_total,
             "scanned": self.scanned,
@@ -164,6 +167,7 @@ class PipelineStats:
                 len(w.get("skipped_members") or []) for w in self.tar_warnings
             ),
             "tar_warnings": self.tar_warnings,
+            "size_warnings": self.size_warnings,
             "teich_trace_results": [asdict(r) for r in trace_results],
         }
         if not include_valid_files and self.teich_valid:
@@ -181,19 +185,6 @@ def _safe_filename(session_key: str) -> str:
     safe = session_key.replace(":", "_").replace("/", "_").replace("\\", "_")
     safe = safe.replace("<", "_").replace(">", "_").replace("|", "_")
     return safe[:180] if len(safe) > 180 else safe
-
-
-def _safe_rel_path(rel: str) -> str:
-    """净化 dropped/unwrapped 相对路径 / Sanitize relative path for sidecar files."""
-    return rel.replace(":", "_").replace("|", "_")
-
-
-def _write_jsonl(path: Path, record: dict[str, Any]) -> None:
-    """写出单条 JSONL 记录（非 trace 格式）/ Write one JSON object as a JSONL line."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as fp:
-        fp.write(json.dumps(record, ensure_ascii=False))
-        fp.write("\n")
 
 
 def clean_output_subdirs(output_dir: Path) -> None:
@@ -350,6 +341,7 @@ def _run_parallel_scan(
 
     stats = merge_stats([r.stats for r in results], cross_file_drops=cross_file_drops)
     stats.tar_warnings = [warning for r in results for warning in r.tar_warnings]
+    stats.size_warnings = [warning for r in results for warning in r.size_warnings]
 
     if log:
         log(f"[scan] parallel scan complete in {_elapsed_str(time.monotonic() - scan_started)}")
@@ -451,6 +443,7 @@ def process(
     dedup_winners: dict[str, tuple[int, dict[str, Any], dict[str, Any], str]] = {}
     pending_exports: list[tuple[dict[str, Any], list[dict[str, Any]], str, Path]] = []
     tar_warnings: list[dict[str, Any]] = []
+    size_warnings: list[dict[str, Any]] = []
 
     use_parallel_scan = workers > 1 and limit_records is None
 
@@ -472,6 +465,7 @@ def process(
             started=started,
         )
         tar_warnings = stats.tar_warnings
+        size_warnings = stats.size_warnings
     else:
         if workers > 1 and limit_records is not None and log:
             log("NOTE: --limit-records forces serial scan (workers ignored for scan)")
@@ -484,6 +478,8 @@ def process(
             limit_files=limit_files,
             exclude_dirs=[output_dir],
             tar_warnings=tar_warnings,
+            size_warnings=size_warnings,
+            log=log,
         ):
             # --- 1a: 限流与文件切换日志 / Rate limits and per-file logging ---
             if limit_records is not None and stats.scanned >= limit_records:
@@ -530,8 +526,12 @@ def process(
             stats.unwrapped += 1
 
             if keep_unwrapped:
-                rel = f"{_safe_rel_path(item['source_file'])}_{item['source_line']}.jsonl"
-                _write_jsonl(unwrapped_dir / rel, unwrapped)
+                write_sidecar_jsonl(
+                    unwrapped_dir,
+                    str(item["source_file"]),
+                    int(item["source_line"]),
+                    unwrapped,
+                )
 
             # --- 1c: filter (R1–R7 evaluate) / Apply procurement filter rules ---
             trajectory = extract(unwrapped)
@@ -541,10 +541,12 @@ def process(
                 stats.drop_reasons.update(reasons)
                 if write_dropped and dropped_dir is not None:
                     dropped = {**record, "_drop_reasons": reasons}
-                    rel = (
-                        f"{_safe_rel_path(item['source_file'])}_{item['source_line']}.jsonl"
+                    write_sidecar_jsonl(
+                        dropped_dir,
+                        str(item["source_file"]),
+                        int(item["source_line"]),
+                        dropped,
                     )
-                    _write_jsonl(dropped_dir / rel, dropped)
                 continue
 
             stats.filter_kept += 1
@@ -561,8 +563,12 @@ def process(
                     stats.drop_reasons["session_id_duplicate"] += 1
                     if write_dropped and dropped_dir is not None:
                         dropped = {**record, "_drop_reasons": ["session_id_duplicate"]}
-                        rel = f"{_safe_rel_path(item['source_file'])}_{item['source_line']}.jsonl"
-                        _write_jsonl(dropped_dir / rel, dropped)
+                        write_sidecar_jsonl(
+                            dropped_dir,
+                            str(item["source_file"]),
+                            int(item["source_line"]),
+                            dropped,
+                        )
                     continue
                 # Keep the longest-messages snapshot; full pass required before export.
                 dedup_winners[sid] = (msg_count, unwrapped, item, session_key)
@@ -584,6 +590,9 @@ def process(
     # === Phase 1 收尾：tar_warnings、scan 汇总 / Scan phase wrap-up ===
     scan_elapsed = time.monotonic() - scan_started
     stats.tar_warnings = tar_warnings
+    stats.size_warnings = size_warnings
+    if size_warnings:
+        stats.parse_errors += len(size_warnings)
     if log and tar_warnings:
         for warning in tar_warnings:
             skipped = warning.get("skipped_members") or []

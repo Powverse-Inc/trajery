@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -16,6 +15,7 @@ from trajery.parser import (
     session_key_from_record,
     unwrap_delivery_record,
 )
+from trajery.paths import write_sidecar_jsonl
 from trajery.pipeline import PipelineStats
 
 DedupEntry = tuple[int, dict[str, Any], dict[str, Any], str]
@@ -26,17 +26,6 @@ def _safe_filename(session_key: str) -> str:
     safe = session_key.replace(":", "_").replace("/", "_").replace("\\", "_")
     safe = safe.replace("<", "_").replace(">", "_").replace("|", "_")
     return safe[:180] if len(safe) > 180 else safe
-
-
-def _safe_rel_path(rel: str) -> str:
-    return rel.replace(":", "_").replace("|", "_")
-
-
-def _write_jsonl(path: Path, record: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as fp:
-        fp.write(json.dumps(record, ensure_ascii=False))
-        fp.write("\n")
 
 
 @dataclass
@@ -59,6 +48,7 @@ class SourceScanResult:
     stats: PipelineStats = field(default_factory=PipelineStats)
     dedup_winners: dict[str, DedupEntry] = field(default_factory=dict)
     tar_warnings: list[dict[str, Any]] = field(default_factory=list)
+    size_warnings: list[dict[str, Any]] = field(default_factory=list)
     pending_exports: list[PendingExport] = field(default_factory=list)
 
 
@@ -109,8 +99,12 @@ def merge_dedup_winners(
                     if isinstance(record, dict):
                         dropped = {**record, "_drop_reasons": ["session_id_duplicate"]}
                         item = entry[2]
-                        rel = f"{_safe_rel_path(item['source_file'])}_{item['source_line']}.jsonl"
-                        _write_jsonl(dropped_dir / rel, dropped)
+                        write_sidecar_jsonl(
+                            dropped_dir,
+                            str(item["source_file"]),
+                            int(item["source_line"]),
+                            dropped,
+                        )
             else:
                 global_winners[sid] = entry
 
@@ -131,6 +125,7 @@ def merge_stats(parts: list[PipelineStats], *, cross_file_drops: int = 0) -> Pip
         merged.dedup_dropped += part.dedup_dropped
         merged.drop_reasons.update(part.drop_reasons)
         merged.tar_warnings.extend(part.tar_warnings)
+        merged.size_warnings.extend(part.size_warnings)
     if cross_file_drops:
         merged.dedup_dropped += cross_file_drops
         merged.drop_reasons["session_id_duplicate"] += cross_file_drops
@@ -170,8 +165,12 @@ def _process_record(
     stats.unwrapped += 1
 
     if config.keep_unwrapped:
-        rel = f"{_safe_rel_path(item['source_file'])}_{item['source_line']}.jsonl"
-        _write_jsonl(unwrapped_dir / rel, unwrapped)
+        write_sidecar_jsonl(
+            unwrapped_dir,
+            str(item["source_file"]),
+            int(item["source_line"]),
+            unwrapped,
+        )
 
     trajectory = extract(unwrapped)
     passed, reasons = evaluate(trajectory)
@@ -180,8 +179,12 @@ def _process_record(
         stats.drop_reasons.update(reasons)
         if config.write_dropped and dropped_dir is not None:
             dropped = {**record, "_drop_reasons": reasons}
-            rel = f"{_safe_rel_path(item['source_file'])}_{item['source_line']}.jsonl"
-            _write_jsonl(dropped_dir / rel, dropped)
+            write_sidecar_jsonl(
+                dropped_dir,
+                str(item["source_file"]),
+                int(item["source_line"]),
+                dropped,
+            )
         return
 
     stats.filter_kept += 1
@@ -196,8 +199,12 @@ def _process_record(
             stats.drop_reasons["session_id_duplicate"] += 1
             if config.write_dropped and dropped_dir is not None:
                 dropped = {**record, "_drop_reasons": ["session_id_duplicate"]}
-                rel = f"{_safe_rel_path(item['source_file'])}_{item['source_line']}.jsonl"
-                _write_jsonl(dropped_dir / rel, dropped)
+                write_sidecar_jsonl(
+                    dropped_dir,
+                    str(item["source_file"]),
+                    int(item["source_line"]),
+                    dropped,
+                )
             return
         dedup_winners[sid] = (msg_count, unwrapped, item, session_key)
         return
@@ -219,15 +226,19 @@ def scan_one_source(args: tuple[str, str, ScanWorkerConfig]) -> SourceScanResult
     traces_dir = Path(config.traces_dir)
 
     if path.name.endswith(".tar.gz"):
-        for kind, *payload in iter_tar_jsonl_with_meta(path):
+        for kind, *payload in iter_tar_jsonl_with_meta(
+            path,
+            rel,
+            size_warnings=result.size_warnings,
+        ):
             if kind == "meta":
                 meta = payload[0]
                 if meta["jsonl_member_count"] > 1:
                     result.tar_warnings.append({**meta, "source_file": rel})
                 continue
-            member_name, line_no, record = payload
+            source_file, line_no, record = payload
             item = {
-                "source_file": f"{rel}:{member_name}",
+                "source_file": source_file,
                 "source_line": line_no,
                 "record": record,
             }
@@ -243,7 +254,11 @@ def scan_one_source(args: tuple[str, str, ScanWorkerConfig]) -> SourceScanResult
             )
         return result
 
-    for item in iter_records_from_source(rel, path):
+    for item in iter_records_from_source(
+        rel,
+        path,
+        size_warnings=result.size_warnings,
+    ):
         _process_record(
             item=item,
             stats=result.stats,
@@ -254,6 +269,7 @@ def scan_one_source(args: tuple[str, str, ScanWorkerConfig]) -> SourceScanResult
             unwrapped_dir=unwrapped_dir,
             traces_dir=traces_dir,
         )
+    result.stats.size_warnings = list(result.size_warnings)
     return result
 
 
