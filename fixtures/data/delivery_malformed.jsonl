@@ -1,0 +1,3 @@
+{"not": "a valid delivery record"}
+{"request": 123, "response": "{}", "request_id": "client:bad-request"}
+{"request": "{\"model\": \"gpt-5\", \"tools\": [], \"input\": []}", "response": "not valid json or sse", "request_id": "client:bad-response"}

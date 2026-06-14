@@ -1,0 +1,142 @@
+"""CLI for the delivery → Teich trace pipeline."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+from trajery.export import check_teich_available
+from trajery.pipeline import process
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Convert delivery logs to Teich Codex traces."
+    )
+    parser.add_argument(
+        "input_dir", type=Path, help="Directory with *.jsonl or *.tar.gz delivery logs"
+    )
+    parser.add_argument(
+        "output_dir",
+        type=Path,
+        nargs="?",
+        default=None,
+        help="Output directory (default: <input_dir>/output)",
+    )
+    parser.add_argument("--limit-files", type=int, default=None)
+    parser.add_argument("--limit-records", type=int, default=None)
+    parser.add_argument("--no-filter", action="store_true", help="Skip R1-R7 filter")
+    parser.add_argument("--no-dedup", action="store_true", help="Skip session_id dedup")
+    parser.add_argument(
+        "--no-dropped",
+        action="store_true",
+        help="Skip writing the dropped/ tree; stats and drop_reasons in report are still collected",
+    )
+    parser.add_argument(
+        "--keep-unwrapped",
+        action="store_true",
+        help="Write unwrapped openai_responses JSONL",
+    )
+    parser.add_argument(
+        "--emit-training-rows",
+        action="store_true",
+        help="Also emit training_rows.jsonl via teich",
+    )
+    parser.add_argument(
+        "--report",
+        type=Path,
+        default=None,
+        help="Write JSON stats report to this path (default: <output_dir>/report.json)",
+    )
+    parser.add_argument(
+        "--no-report",
+        action="store_true",
+        help="Skip writing the stats report",
+    )
+    parser.add_argument("--quiet", action="store_true")
+    parser.add_argument(
+        "--progress-every",
+        type=int,
+        default=100,
+        help="Log scan progress every N records (0=off, default 100)",
+    )
+    parser.add_argument(
+        "--clean-output",
+        action="store_true",
+        help="Clear traces/, incomplete/, invalid/, dropped/, unwrapped/ before running",
+    )
+    parser.add_argument(
+        "--skip-teich-validate",
+        action="store_true",
+        help="Skip Teich validation (for environments without teich installed)",
+    )
+    parser.add_argument(
+        "--strict-empty", action="store_true", help="Exit 1 if teich_valid == 0"
+    )
+    args = parser.parse_args(argv)
+
+    if not args.input_dir.is_dir():
+        print(f"ERROR: input_dir is not a directory: {args.input_dir}", file=sys.stderr)
+        return 2
+
+    if not args.skip_teich_validate:
+        teich_ok, teich_err = check_teich_available()
+        if not teich_ok:
+            print(
+                "ERROR: teich is required for trace validation. "
+                f"Install teich or pass --skip-teich-validate. ({teich_err})",
+                file=sys.stderr,
+            )
+            return 3
+
+    output_dir = (
+        args.output_dir if args.output_dir is not None else args.input_dir / "output"
+    )
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    def log(msg: str) -> None:
+        print(msg, file=sys.stderr)
+
+    if args.output_dir is None and not args.quiet:
+        log(f"output_dir (default): {output_dir}")
+
+    if not args.quiet:
+        log("=== delivery_to_teich: starting ===")
+
+    stats = process(
+        input_dir=args.input_dir,
+        output_dir=output_dir,
+        apply_filter=not args.no_filter,
+        dedup=not args.no_dedup,
+        keep_unwrapped=args.keep_unwrapped,
+        write_dropped=not args.no_dropped,
+        emit_training_rows=args.emit_training_rows,
+        limit_files=args.limit_files,
+        limit_records=args.limit_records,
+        progress_every=args.progress_every,
+        clean_output=args.clean_output,
+        skip_teich_validate=args.skip_teich_validate,
+        log=None if args.quiet else log,
+    )
+
+    if not args.no_report:
+        report_path = (
+            args.report if args.report is not None else output_dir / "report.json"
+        )
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(
+            json.dumps(
+                stats.to_report(input_dir=args.input_dir, output_dir=output_dir),
+                indent=2,
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        if not args.quiet:
+            log(f"report: {report_path}")
+
+    if args.strict_empty and stats.teich_valid == 0:
+        return 1
+    return 0

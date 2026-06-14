@@ -1,0 +1,11 @@
+# trajery runtime dependencies
+#
+# Core pipeline modules use only the Python 3.10+ stdlib.
+# Install teich for trace validation and --emit-training-rows:
+#
+#   pip install -e /path/to/teich
+#
+# teich is not pinned on PyPI in this repo; install from your local checkout
+# or internal package index.
+
+teich
