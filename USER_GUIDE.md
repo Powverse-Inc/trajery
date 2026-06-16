@@ -169,7 +169,7 @@ python filter_traj_multi_plat.py <input_dir> [<output_dir>] \
 | 限制 | 说明 |
 |------|------|
 | **jsonl.gz 流式读取** | `*.jsonl.gz` 通过 `gzip.open` 逐行解压，不写入临时 `.jsonl` 文件 |
-| **tar.gz 单成员** | 每个 `.tar.gz` 只读取**第一个** `.jsonl` 成员；多成员时在日志与报表 `tar_warnings` 中告警 |
+| **tar.gz 多成员** | 每个 `.tar.gz` 会读取并处理归档内**所有**安全 `.jsonl` 成员；明细会写入报表 `tar_warnings` |
 | **dedup 内存** | 默认在内存中缓冲每个 session 的最长快照；超大目录需注意内存 |
 | **并行 scan** | `--workers > 1` 时按源文件并行；机械硬盘建议 `2~4`，NVMe 可用 CPU 核心数；`--limit-records` 时强制串行 |
 | **时间戳** | Codex 事件使用**导出时 UTC**，非 delivery 原始时间戳 |

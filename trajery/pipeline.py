@@ -595,11 +595,13 @@ def process(
         stats.parse_errors += len(size_warnings)
     if log and tar_warnings:
         for warning in tar_warnings:
-            skipped = warning.get("skipped_members") or []
+            members = warning.get("used_members") or []
+            if not isinstance(members, list):
+                members = []
             log(
-                f"WARNING: tar {warning.get('source_file')} has "
+                f"INFO: tar {warning.get('source_file')} has "
                 f"{warning.get('jsonl_member_count')} .jsonl members; "
-                f"using {warning.get('used_member')!r}, skipping {len(skipped)}"
+                f"processing all members ({len(members)})"
             )
     if log:
         log("=== delivery_to_teich: scan phase complete ===")

@@ -81,7 +81,7 @@
 
 | 限制 | 影响范围 | 用户文档 |
 |------|----------|----------|
-| tar.gz 仅读第一个 `.jsonl` 成员 | `parser/delivery.py` | USER_GUIDE §5 |
+| tar.gz 处理全部安全 `.jsonl` 成员 | `parser/delivery.py` | USER_GUIDE §5 |
 | dedup 全量内存缓冲 | `pipeline.py` scan 阶段 | USER_GUIDE §5 |
 | Codex 时间戳为导出时 UTC | `export/codex.py` | USER_GUIDE §5 |
 | 主流水线仅处理 delivery 信封 | — | USER_GUIDE §4.4（`filter_traj_multi_plat.py` 处理 `*.json`） |

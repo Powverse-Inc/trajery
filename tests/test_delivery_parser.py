@@ -152,7 +152,11 @@ class FixtureIntegrationTests(unittest.TestCase):
         meta = inspect_tar_jsonl_members(FIXTURES_DATA / "delivery_multi_member.tar.gz")
         self.assertEqual(meta["jsonl_member_count"], 2)
         self.assertEqual(meta["used_member"], "shard_a.jsonl")
-        self.assertEqual(meta["skipped_members"], ["shard_b.jsonl"])
+        self.assertEqual(
+            meta["used_members"],
+            ["shard_a.jsonl", "shard_b.jsonl"],
+        )
+        self.assertEqual(meta["skipped_members"], [])
 
     def test_tar_single_open_yields_same_records(self) -> None:
         from trajery.parser.delivery import iter_delivery_records, iter_tar_jsonl_with_meta

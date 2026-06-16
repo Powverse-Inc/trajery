@@ -11,12 +11,12 @@ Parse distillXC delivery logs into openai_responses records.
   - ``input`` / ``output`` (int?): token 计数
   - ``stop_reason`` / ``trajectory_state``: 写入 ``_provenance``；R5 以 extract 结果为准
 - 上游：``*.jsonl`` / ``*.jsonl.gz`` / ``*.tar.gz`` 文件；下游：``pipeline.process``、``response_sse.parse_delivery_response``
-- 已知限制：每个 ``.tar.gz`` 仅读取第一个 ``.jsonl`` 成员（见 MAINTAINER、USER_GUIDE §5）
+- tar 归档：读取并处理归档内**所有**安全 ``.jsonl`` 成员（见 MAINTAINER、USER_GUIDE §5）
 
 English:
 - Parser layer: scans delivery files, unwraps L0 envelopes into L1 openai_responses records.
 - Consumes ``*.jsonl``, ``*.jsonl.gz``, and ``*.tar.gz``; delegates ``response`` parsing to ``response_sse``.
-- Tar archives: only the first ``.jsonl`` member is read; multi-member archives emit warnings.
+- Tar archives: reads and processes **all** safe ``.jsonl`` members inside the archive.
 
 iter_delivery_records yield shape::
 
@@ -149,14 +149,17 @@ def _tar_jsonl_meta(path: Path, members: list[str]) -> dict[str, Any]:
             "archive": str(path),
             "jsonl_member_count": 0,
             "used_member": None,
+            "used_members": [],
             "skipped_members": [],
         }
     return {
         "archive": str(path),
         "jsonl_member_count": len(members),
-        # Policy: only the first .jsonl member is consumed (see USER_GUIDE §5).
+        # Back-compat: some reports/tests expect a single "used_member".
         "used_member": members[0],
-        "skipped_members": members[1:],
+        # New policy: process ALL safe .jsonl members; nothing is skipped.
+        "used_members": members,
+        "skipped_members": [],
     }
 
 
@@ -223,20 +226,20 @@ def _iter_tar_jsonl(
     size_warnings: list[dict[str, Any]] | None = None,
     log: Callable[[str], None] | None = None,
 ) -> Iterator[tuple[str, int, dict[str, Any] | None, str | None]]:
-    """迭代 tar 内首个 .jsonl 成员的行 / Iterate lines from the first .jsonl in tar."""
+    """迭代 tar 内所有安全 .jsonl 成员的行 / Iterate lines from all safe .jsonl in tar."""
     with tarfile.open(path, "r:gz") as archive:
         members = _tar_jsonl_member_names(archive)
         if not members:
             return
-        member_name = members[0]
-        for line_no, record, raw in _iter_tar_jsonl_lines(
-            archive,
-            member_name,
-            rel,
-            size_warnings=size_warnings,
-            log=log,
-        ):
-            yield member_name, line_no, record, raw
+        for member_name in members:
+            for line_no, record, raw in _iter_tar_jsonl_lines(
+                archive,
+                member_name,
+                rel,
+                size_warnings=size_warnings,
+                log=log,
+            ):
+                yield member_name, line_no, record, raw
 
 
 def iter_tar_jsonl_with_meta(
@@ -258,16 +261,16 @@ def iter_tar_jsonl_with_meta(
         yield "meta", meta
         if not members:
             return
-        member_name = members[0]
-        safe_member = sanitize_sidecar_segment(member_name)
-        for line_no, record, _raw in _iter_tar_jsonl_lines(
-            archive,
-            member_name,
-            rel_path,
-            size_warnings=size_warnings,
-            log=log,
-        ):
-            yield "record", f"{rel_path}:{safe_member}", line_no, record
+        for member_name in members:
+            safe_member = sanitize_sidecar_segment(member_name)
+            for line_no, record, _raw in _iter_tar_jsonl_lines(
+                archive,
+                member_name,
+                rel_path,
+                size_warnings=size_warnings,
+                log=log,
+            ):
+                yield "record", f"{rel_path}:{safe_member}", line_no, record
 
 
 def iter_records_from_source(

@@ -99,9 +99,14 @@ class DeliveryToTeichProcessTests(unittest.TestCase):
         self.assertEqual(len(stats.tar_warnings), 1)
         self.assertEqual(stats.tar_warnings[0]["jsonl_member_count"], 2)
         self.assertEqual(stats.tar_warnings[0]["used_member"], "shard_a.jsonl")
+        self.assertEqual(
+            stats.tar_warnings[0]["used_members"],
+            ["shard_a.jsonl", "shard_b.jsonl"],
+        )
+        self.assertEqual(stats.tar_warnings[0]["skipped_members"], [])
         report = stats.to_report(input_dir=self.input_dir, output_dir=self.output_dir)
         self.assertEqual(report["tar_archives_with_multiple_jsonl"], 1)
-        self.assertEqual(report["tar_skipped_jsonl_members"], 1)
+        self.assertEqual(report["tar_skipped_jsonl_members"], 0)
         self.assertIn("elapsed_seconds", report)
         self.assertGreaterEqual(report["elapsed_seconds"], 0.0)
         self.assertIn("export_total", report)

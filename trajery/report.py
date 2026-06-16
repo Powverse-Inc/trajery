@@ -214,17 +214,21 @@ def to_markdown_report(
 
     tar_warnings: list[dict[str, Any]] = report.get("tar_warnings") or []
     if tar_warnings:
-        lines.append("## tar 告警")
+        lines.append("## tar 明细")
         lines.append("")
         for warning in tar_warnings:
-            skipped = warning.get("skipped_members") or []
+            used_members = warning.get("used_members") or []
+            if not isinstance(used_members, list):
+                used_members = []
             lines.append(
                 f"- `{warning.get('source_file')}`: "
                 f"{warning.get('jsonl_member_count')} 个 .jsonl 成员，"
-                f"使用 `{warning.get('used_member')}`，跳过 {len(skipped)} 个"
+                f"将处理全部成员（{len(used_members)} 个）"
             )
-            if skipped:
-                lines.append(f"  - 跳过: {', '.join(skipped)}")
+            if used_members:
+                shown = ", ".join(str(x) for x in used_members[:20])
+                suffix = " ..." if len(used_members) > 20 else ""
+                lines.append(f"  - 成员: {shown}{suffix}")
         lines.append("")
 
     unwrap_failures: dict[str, int] = report.get("unwrap_failures") or {}
